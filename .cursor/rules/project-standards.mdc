@@ -1,0 +1,15 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- Use `uv` for managing Python dependencies and running scripts.
+- For installing dependencies, use `uv pip install <package_name>`.
+- To install dependencies from `pyproject.toml` (or `requirements.txt`), use `uv pip sync pyproject.toml`.
+- To run scripts defined in `pyproject.toml`, use `uv run <script_name>`. For example, `uv run start_server`.
+- Keep `pyproject.toml` updated with all project dependencies.
+- Use `ruff` for linting Python code.
+- Use `ruff format` for formatting Python code.
+- Adhere to PEP 8 and other standard Python style guides enforced by `ruff`.
+- Run `ruff check --fix .` to lint and automatically fix issues.
+- Run `ruff format .` to format all Python files in the project.
