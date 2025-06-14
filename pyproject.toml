@@ -6,24 +6,26 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
 authors = [
-    {name = "Timothy J Fontaine"}
+    {name = "Timothy J Fontaine", email = "tjfontaine@gmail.com"}
 ]
 keywords = ["llm", "http", "server", "ai", "openai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "openai>=1.82.1",
+    "openai-agents>=0.0.17",
     "aiohttp>=3.9.5",
     "ruff>=0.4.4",
     "python-json-logger>=2.0.0",
-    "rich>=13.0.0"
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.1",
+    "jinja2",
 ]
 
 [project.scripts]

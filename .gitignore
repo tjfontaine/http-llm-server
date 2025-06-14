@@ -11,3 +11,7 @@ wheels/
 
 conversation_logs/*
 .env
+
+.ruff_cache/
+.python-version
+*.db

@@ -28,15 +28,35 @@ import http.server
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from email.utils import formatdate
 
-import openai
+import yaml
+from agents import (
+    Agent,
+    AsyncOpenAI,
+    OpenAIChatCompletionsModel,
+    Runner,
+    set_tracing_disabled,
+)
+from agents.items import MessageOutputItem
+from agents.mcp import MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
+from agents.model_settings import ModelSettings
+from agents.stream_events import RunItemStreamEvent, RawResponsesStreamEvent
+from agents.tool import FunctionTool
 from aiohttp import web
 from pythonjsonlogger import jsonlogger
 from rich.logging import RichHandler
+from dotenv import dotenv_values
+import jinja2
+
+from agents.mcp.server import _MCPServerWithClientSession
+
+# Default web app file path
+DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
 
 
 class AbstractSessionStore(abc.ABC):
@@ -102,7 +122,7 @@ class InMemorySessionStore(AbstractSessionStore):
                 "Conversation saving to disk is disabled. Skipping save_all_sessions_on_shutdown (via InMemorySessionStore)."
             )
             return
-            
+
         try:
             os.makedirs(log_directory, exist_ok=True)
             self._logger.info(
@@ -164,7 +184,7 @@ Your output MUST be the raw HTTP response itself, starting *immediately* with th
 **Important Server Behavior Notes for You (LLM):**
 -   **No Content-Length:** You MUST NOT calculate or include the `Content-Length` header in your responses. The server will handle appropriate framing for streaming the output (e.g., via `Connection: close` or chunked encoding).
 -   **Connection Management:** Do NOT include the `Connection` header (e.g., `Connection: keep-alive`). The server will manage the connection and will close it after sending your response to signal the end of the stream.
--   **Date and Server Headers:** The actual server will add its own `Date` and `Server` headers. For your information, these headers will be similar to `Date: {dynamic_date_example}` and `Server: {dynamic_server_name_example}`. You MUST NOT include `Date` or `Server` headers in YOUR generated response block.
+-   **Date and Server Headers:** The actual server will add its own `Date` and `Server` headers. For your information, these headers will be similar to `Date: {{ dynamic_date_example }}` and `Server: {{ dynamic_server_name_example }}`. You MUST NOT include `Date` or `Server` headers in YOUR generated response block.
 -   **Clean Output:** The response body should consist *only* of the content intended for the client (e.g., HTML, JSON, text). Do not include any extraneous metadata, annotations, internal thoughts.
 
 **Session Management:**
@@ -174,106 +194,66 @@ Your output MUST be the raw HTTP response itself, starting *immediately* with th
     -   `SESSION_ID`: The current session identifier
     -   `IS_NEW_SESSION`: Boolean indicating if this is a new session (true) or continuing session (false)
     -   `SESSION_HISTORY_COUNT`: Number of previous turns in this session
+    -   `GLOBAL_STATE`: A JSON string representing the current server-side global state.
 -   **Cookie Handling Rules:**
     -   **If IS_NEW_SESSION is true**: You MUST include a "Set-Cookie" header in your response:
-        `Set-Cookie: X-Chat-Session-ID={{SESSION_ID}}; Path=/; HttpOnly; SameSite=Lax`
+        `Set-Cookie: X-Chat-Session-ID={{ session_id }}; Path=/; HttpOnly; SameSite=Lax`
     -   **If IS_NEW_SESSION is false**: Do NOT include any "Set-Cookie" header for the session ID (it's already established)
 
 **HTML Generation Requirement:**
 -   You are responsible for generating the complete HTML document for each response, including `<!DOCTYPE html>`, `<html>`, `<head>` (with `<meta charset="UTF-8">` and `<meta name="viewport" content="width=device-width, initial-scale=1.0">`), and `<body>` tags.
 
 **Current Session Context:**
-- SESSION_ID: {{session_id}}
-- IS_NEW_SESSION: {{is_new_session}}
-- SESSION_HISTORY_COUNT: {{session_history_count}}
+- SESSION_ID: {{ session_id }}
+- IS_NEW_SESSION: {{ is_new_session }}
+- SESSION_HISTORY_COUNT: {{ session_history_count }}
+- GLOBAL_STATE: {{ global_state }}
 """
 
-DEFAULT_WEB_APP_TECHNICAL_RULES = """**Default Informational Web Application**
 
-**Objective:**
-You are to generate a simple, multi-page informational website about the "HTTP LLM Server" project.
-The website should have a homepage and a few other distinct pages.
-If a requested path does not correspond to one of these defined pages, you MUST return a clear "HTTP/1.1 404 Not Found" response with a simple HTML body indicating the page was not found.
-
-**Session-Aware Behavior:**
--   **New Sessions (IS_NEW_SESSION = true):** Display a brief welcome message or introduction on the homepage. You may also show a "first visit" indicator.
--   **Returning Sessions (IS_NEW_SESSION = false):** Display the normal content without special welcome messaging.
--   **Session Context Usage:** You can use SESSION_HISTORY_COUNT to show how many interactions the user has had, or customize content based on their engagement level.
-
-**Core Content & Pages:**
-1.  **Homepage (Path: `/`):**
-    *   **Title:** "Welcome to the HTTP LLM Server Project"
-    *   **Content:**
-        *   A brief introduction explaining what the HTTP LLM Server is (an AI-powered server that dynamically generates HTTP responses, including web pages, based on LLM interactions).
-        *   Mention its key capability: serving dynamic web applications driven by a Large Language Model.
-        *   Provide simple navigation links to the other pages (e.g., "About", "Features", "Usage").
-        *   **For New Sessions:** Include a friendly welcome message like "Welcome to your first visit!" or "New to the HTTP LLM Server? Start here!"
-        *   **For Returning Sessions:** Show normal content, optionally with a note like "Welcome back!" or display interaction count.
-    *   A small, visually appealing footer with "Powered by LLM" or similar.
-
-2.  **Random Pages (LLM Discretion):**
-    *   You should be prepared to serve content for **three additional, distinct informational pages**.
-    *   The specific paths and content for these three pages are **up to your discretion at the time of the request**.
-    *   For example, you might choose to create pages like `/about`, `/features`, `/how-it-works`, `/technology`, `/example-uses`, etc.
-    *   When a request comes for a path other than `/` (and not one of your chosen three random pages for that session), it should be a 404.
-    *   **Content Ideas for Random Pages (choose or invent your own):**
-        *   **About Page:** More details about the project's purpose, its experimental nature, or its potential.
-        *   **Features Page:** Highlight key features (e.g., dynamic HTML generation, session management, configurable prompts).
-        *   **Technology Page:** Briefly mention the core technologies used (e.g., Python, aiohttp, OpenAI LLMs).
-        *   **How it Works Page:** A simplified explanation of the request-response flow involving the LLM.
-        *   **Usage/Examples Page:** Conceptual ideas on how one might use such a server.
-    *   Each of these pages should also have:
-        *   A clear title.
-        *   A link back to the Homepage.
-        *   The same footer as the homepage.
-
-3.  **404 Not Found Page (Any other path):**
-    *   **Status Line:** `HTTP/1.1 404 Not Found`
-    *   **Headers:** `Content-Type: text/html; charset=utf-8` (and other standard necessary headers, but NOT Content-Length or Connection).
-    *   **Body:**
-        ```html
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>404 Not Found</title>
-            <style>
-                body { font-family: sans-serif; text-align: center; padding-top: 50px; color: #333; }
-                h1 { font-size: 3em; color: #d9534f; }
-                p { font-size: 1.2em; }
-                a { color: #007bff; text-decoration: none; }
-                a:hover { text-decoration: underline; }
-            </style>
-        </head>
-        <body>
-            <h1>404 - Page Not Found</h1>
-            <p>Sorry, the page you are looking for does not exist.</p>
-            <p><a href="/">Return to Homepage</a></p>
-        </body>
-        </html>
-        ```
-
-**Key Technical Requirements and Guidelines for Generated Web Content (applies to all pages unless it's a 404 response):**
--   **No External Resources:** DO NOT use external resources. All styling via embedded `<style>` tags in `<head>`, all JS inline in `<script>` tags.
--   **Styling:** Simple, clean, professional. Use CSS in `<style>` tags. Good readability.
--   **Interactivity:** Minimal to none. Focus is on informational content. Navigation via standard `<a>` tags.
--   **Semantic HTML:** Use appropriate HTML5 semantic elements.
--   **Viewport Meta Tag:** Ensure `<meta name="viewport" content="width=device-width, initial-scale=1.0">` is in the `<head>`.
--   **Conciseness for Default App:** For this default informational website, aim for concise and to-the-point content on each page to ensure reasonably fast load times and a good default user experience. Brevity is valued here.
--   **Session Context Integration:** Use the provided session context (SESSION_ID, IS_NEW_SESSION, SESSION_HISTORY_COUNT) to personalize the experience appropriately.
-
-**HTTP Response Structure (for 200 OK pages):**
--   Remember to generate the full HTTP response: status line (e.g., `HTTP/1.1 200 OK`), headers (e.g., `Content-Type: text/html; charset=utf-8`), a blank line, and then the HTML body.
--   Do NOT include `Content-Length` or `Connection` headers.
--   **Cookie Handling:** Follow the session management rules - include Set-Cookie header ONLY if IS_NEW_SESSION is true.
-
-**Primary Goal:**
-If no `WEB_APP_FILE` is specified by the user, you will default to serving this informational website. The server will still load `DEFAULT_WEB_APP_TECHNICAL_RULES` (which is this entire block) and then look for `WEB_APP_PROMPT_CONTENT_FROM_FILE`. If the file content is empty or the file is not found, `SYSTEM_PROMPT` will effectively be `LLM_HTTP_SERVER_PROMPT` + this informational website prompt.
+ERROR_PAGE_TEMPLATE_STR = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Server Error: {{ message }}</title>
+    <style>
+        body {font-family: sans-serif; margin:20px;}
+        h1 {color: #cc0000;}
+        .details {background-color: #f0f0f0; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word;}
+    </style>
+</head>
+<body>
+    <h1>HTTP {{ status_code }} - {{ message }}</h1>
+    <p class="details">{{ error_details | e }}</p>
+</body>
+</html>
 """
+ERROR_PAGE_TEMPLATE = jinja2.Template(ERROR_PAGE_TEMPLATE_STR)
+
+
+ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert web developer generating a user-friendly and stylish error page.
+Your response MUST be a complete and valid HTTP response, starting directly with the status line (e.g., "HTTP/1.1 500 Internal Server Error").
+Do NOT use markdown fences or any other formatting around the raw HTTP response.
+The server will handle `Content-Length`, `Connection`, `Date`, and `Server` headers. Do not include them.
+
+**Error Information to Display:**
+- HTTP Status Code: {{ status_code }}
+- Main Error Message: {{ message }}
+- Technical Details (display this in a subtle way, perhaps in a collapsible section or a small font, if appropriate for the style): {{ error_details }}
+
+**Style and Tone Guidelines:**
+The error page's design, layout, and language should seamlessly match the web application described below.
+Adhere to its visual identity to ensure a consistent user experience even during errors.
+
+<web_application_rules>
+{{ web_app_rules }}
+</web_application_rules>
+"""
+
 
 # --- In-memory Conversation History Storage (for logging and potential rehydration) ---
 # Key: session_id, Value: list of conversation turns (OpenAI format: {"role": "user/assistant", "content": "..."})
+
 
 # --- Logging Configuration (Global for simplicity, initialized early) ---
 # Custom formatter for JSON logs
@@ -281,14 +261,17 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
         super().add_fields(log_record, record, message_dict)
         if not log_record.get("timestamp"):
-            log_record["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            log_record["timestamp"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
         if log_record.get("levelname"):
             log_record["severity"] = log_record["levelname"].upper()
-            del log_record["levelname"] # Remove original levelname
+            del log_record["levelname"]  # Remove original levelname
         else:
-            log_record["severity"] = "INFO" # Default severity
+            log_record["severity"] = "INFO"  # Default severity
         if not log_record.get("logger"):
             log_record["logger"] = record.name
+
 
 app_logger = logging.getLogger("llm_http_server_app")
 app_logger.setLevel(logging.INFO)
@@ -300,19 +283,60 @@ conversation_logger.setLevel(logging.INFO)
 # Use the custom JSON formatter
 # The format string for JsonFormatter defines which record attributes to pick for the log output.
 # We can add more fields here if needed, e.g. '%(module)s %(funcName)s'
-json_formatter = CustomJsonFormatter("%(timestamp)s %(severity)s %(logger)s %(message)s")
+json_formatter = CustomJsonFormatter(
+    "%(timestamp)s %(severity)s %(logger)s %(message)s"
+)
 
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(json_formatter) # Apply JSON formatter
+console_handler.setFormatter(json_formatter)  # Apply JSON formatter
 
 # Clear existing handlers and add the new JSON one
 for logger_instance in [app_logger, access_logger, conversation_logger]:
     if logger_instance.hasHandlers():
         logger_instance.handlers.clear()
     # Replace StreamHandler with RichHandler for colorful output
-    rich_handler = RichHandler(rich_tracebacks=True, show_path=False) # show_path=False to keep logs cleaner
+    rich_handler = RichHandler(
+        rich_tracebacks=True, show_path=False
+    )  # show_path=False to keep logs cleaner
     logger_instance.addHandler(rich_handler)
-    logger_instance.propagate = False # Prevent duplicate logs from root logger
+    logger_instance.propagate = False  # Prevent duplicate logs from root logger
+
+
+# --- Monkey-patching for MCP Tool Call Logging ---
+# This section dynamically adds logging to the agents library without modifying it directly.
+# We are replacing the original call_tool method with our own wrapper that adds logs.
+
+# 1. Keep a reference to the original method
+original_call_tool = _MCPServerWithClientSession.call_tool
+
+
+# 2. Define our new async function with logging
+async def _logged_call_tool(self, tool_name, arguments):
+    """A wrapper around the original call_tool that adds logging."""
+    app_logger.info(
+        f"MCP_TOOL_CALL: Server='{self.name}', Tool='{tool_name}', Args='{arguments}'"
+    )
+    try:
+        # Call the original method that we saved earlier
+        result = await original_call_tool(self, tool_name, arguments)
+        app_logger.info(
+            f"MCP_TOOL_SUCCESS: Server='{self.name}', Tool='{tool_name}', "
+            f"Result='{result}'"
+        )
+        return result
+    except Exception as e:
+        app_logger.error(
+            f"MCP_TOOL_ERROR: Server='{self.name}', Tool='{tool_name}', Error='{e}'"
+        )
+        raise
+
+
+# 3. Apply the patch
+_MCPServerWithClientSession.call_tool = _logged_call_tool
+app_logger.info(
+    "Applied monkey-patch to _MCPServerWithClientSession.call_tool for enhanced logging."
+)
+# --- End of Monkey-patching ---
 
 
 def _initialize_configuration_and_client():
@@ -325,73 +349,116 @@ def _initialize_configuration_and_client():
     DEFAULT_PORT = 8080
     DEFAULT_OPENAI_MODEL_NAME = "gpt-4o"
     DEFAULT_OPENAI_TEMPERATURE = 0.7
-    DEFAULT_SERVER_NAME_FOR_PROMPT = "LLMWebServer/0.1"
+    DEFAULT_MAX_TURNS = 25
 
+    # Pre-parser to find --env-file without triggering help or errors for other args
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--env-file", type=str, default=None)
+    args_partial, _ = pre_parser.parse_known_args()
+
+    # Load .env file if specified, otherwise try default .env in current directory
+    env_vars = None
+    env_file_to_load = args_partial.env_file
+    if not env_file_to_load:
+        default_env_path = os.path.join(os.getcwd(), ".env")
+        if os.path.isfile(default_env_path):
+            env_file_to_load = default_env_path
+
+    if env_file_to_load:
+        try:
+            env_vars = dotenv_values(env_file_to_load)
+            if env_vars:
+                app_logger.info(
+                    f"Loaded environment variables from .env file: {env_file_to_load}"
+                )
+                app_logger.info(f".env keys loaded: {sorted(env_vars.keys())}")
+            else:
+                app_logger.warning(
+                    f".env file specified but empty or not found: {env_file_to_load}"
+                )
+        except Exception as e:
+            app_logger.error(f"Error loading .env file '{env_file_to_load}': {e}")
+            env_vars = None
+
+    def get_env(key, default=None):
+        if env_vars is not None and key in env_vars and env_vars[key] is not None:
+            return env_vars[key]
+        return os.environ.get(key, default)
+
+    # Now, define the full parser with all arguments, which will handle --help correctly
     parser = argparse.ArgumentParser(description="LLM HTTP Server")
+    parser.add_argument(
+        "--env-file",
+        type=str,
+        default=None,
+        help="Path to a .env file to load environment variables from. Defaults to '.env' in the current directory if it exists.",
+    )
     parser.add_argument(
         "--port",
         type=int,
-        default=None,
+        default=None,  # We will resolve the default after parsing
         help=f"Port to run the server on (default: {DEFAULT_PORT}, or from PORT env var)",
     )
     parser.add_argument(
         "--api-key",
         type=str,
-        default=os.environ.get("OPENAI_API_KEY"),
+        default=get_env("OPENAI_API_KEY"),
         help="OpenAI API Key (can also be set with OPENAI_API_KEY env var)",
     )
     parser.add_argument(
         "--base-url",
         type=str,
-        default=os.environ.get("OPENAI_BASE_URL"),
+        default=get_env("OPENAI_BASE_URL"),
         help="Optional OpenAI compatible base URL (can also be set with OPENAI_BASE_URL env var)",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default=None,
+        default=None,  # Resolve default after parsing
         help=f"OpenAI Model Name (default: {DEFAULT_OPENAI_MODEL_NAME}, or from OPENAI_MODEL_NAME env var)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=None,
+        default=None,  # Resolve default after parsing
         help=f"OpenAI Temperature (default: {DEFAULT_OPENAI_TEMPERATURE}, or from OPENAI_TEMPERATURE env var)",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,  # We will resolve the default after parsing
+        help=f"Maximum number of turns for the agent (default: {DEFAULT_MAX_TURNS}, or from MAX_TURNS env var)",
     )
     parser.add_argument(
         "--web-app-file",
         type=str,
-        default=os.environ.get("WEB_APP_FILE"),
-        help="Path to a file containing custom web application instructions (can also be set with WEB_APP_FILE env var)",
+        default=get_env("WEB_APP_FILE"),
+        help="Path to a markdown file with YAML front matter containing web application instructions and optional MCP server configuration (can also be set with WEB_APP_FILE env var)",
     )
     parser.add_argument(
         "--save-conversations",
         action="store_true",
-        default=os.environ.get("SAVE_CONVERSATIONS", "").lower() in ("true", "1", "yes"),
+        default=str(get_env("SAVE_CONVERSATIONS", "")).lower() in ("true", "1", "yes"),
         help="Save conversation history to files (can also be set with SAVE_CONVERSATIONS env var)",
     )
+
+    # Now parse all arguments for real
     args = parser.parse_args()
 
+    # --- Now build the final config from args and get_env ---
     config = {}
     config["PORT"] = (
-        args.port
-        if args.port is not None
-        else int(os.environ.get("PORT", DEFAULT_PORT))
+        args.port if args.port is not None else int(get_env("PORT", DEFAULT_PORT))
     )
-    config["API_KEY"] = args.api_key
-    config["OPENAI_BASE_URL"] = args.base_url
-    config["OPENAI_MODEL_NAME"] = (
-        args.model
-        if args.model is not None
-        else os.environ.get("OPENAI_MODEL_NAME", DEFAULT_OPENAI_MODEL_NAME)
+    config["API_KEY"] = args.api_key  # Already resolved from get_env in default
+    config["OPENAI_BASE_URL"] = args.base_url  # Already resolved
+    config["WEB_APP_FILE"] = args.web_app_file  # Already resolved
+    config["SAVE_CONVERSATIONS"] = args.save_conversations  # Already resolved
+    config["MAX_TURNS"] = (
+        args.max_turns
+        if args.max_turns is not None
+        else int(get_env("MAX_TURNS", DEFAULT_MAX_TURNS))
     )
-    config["OPENAI_TEMPERATURE"] = (
-        args.temperature
-        if args.temperature is not None
-        else float(os.environ.get("OPENAI_TEMPERATURE", DEFAULT_OPENAI_TEMPERATURE))
-    )
-    config["WEB_APP_FILE"] = args.web_app_file
-    config["SAVE_CONVERSATIONS"] = args.save_conversations
 
     if not config["API_KEY"]:
         app_logger.error(
@@ -400,72 +467,322 @@ def _initialize_configuration_and_client():
         exit(1)
 
     WEB_APP_PROMPT_CONTENT_FROM_FILE = ""
-    if config["WEB_APP_FILE"]:
-        try:
-            with open(config["WEB_APP_FILE"], "r", encoding="utf-8") as f:
-                WEB_APP_PROMPT_CONTENT_FROM_FILE = f.read()
-            if WEB_APP_PROMPT_CONTENT_FROM_FILE.strip():
-                app_logger.info(
-                    f"Successfully loaded web app prompt content from: {config['WEB_APP_FILE']}"
-                )
-            else:
-                app_logger.warning(
-                    f"Web app prompt file '{config['WEB_APP_FILE']}' is empty. Using default web app technical rules only."
-                )
-                WEB_APP_PROMPT_CONTENT_FROM_FILE = ""
-        except FileNotFoundError:
-            app_logger.warning(
-                f"Web app prompt file not found: {config['WEB_APP_FILE']}. Using default web app technical rules only."
-            )
-        except Exception:
-            app_logger.exception(
-                f"Error reading web app prompt file '{config['WEB_APP_FILE']}':"
-            )
-            app_logger.warning(
-                "Proceeding with default web app technical rules only due to error."
-            )
-    else:
-        app_logger.info(
-            "No WEB_APP_FILE specified (via --web-app-file or WEB_APP_FILE env var). Using default web app technical rules only for web app content."
+    webapp_yaml_data = {}
+
+    # Determine which web app file to use
+    web_app_file_to_use = config["WEB_APP_FILE"] or DEFAULT_WEB_APP_FILE
+    is_using_default = not config["WEB_APP_FILE"]
+
+    try:
+        webapp_yaml_data, WEB_APP_PROMPT_CONTENT_FROM_FILE = _parse_webapp_file(
+            web_app_file_to_use
         )
 
-    # Prepare dynamic examples for the LLM server prompt
-    server_name_example_for_prompt = DEFAULT_SERVER_NAME_FOR_PROMPT
-    current_gmt_date_example_for_prompt = formatdate(timeval=None, localtime=False, usegmt=True)
+        if WEB_APP_PROMPT_CONTENT_FROM_FILE.strip():
+            if is_using_default:
+                app_logger.info(
+                    f"No WEB_APP_FILE specified. Using default web app: {web_app_file_to_use}"
+                )
+            else:
+                app_logger.info(
+                    f"Successfully loaded web app content from: {web_app_file_to_use}"
+                )
 
-    formatted_llm_server_prompt = LLM_HTTP_SERVER_PROMPT_BASE.format(
-        dynamic_date_example=current_gmt_date_example_for_prompt,
-        dynamic_server_name_example=server_name_example_for_prompt
-    )
+            if webapp_yaml_data:
+                app_logger.info(
+                    f"Loaded webapp metadata: {list(webapp_yaml_data.keys())}"
+                )
+        else:
+            app_logger.warning(
+                f"Web app file '{web_app_file_to_use}' has no content. Using empty content."
+            )
+            WEB_APP_PROMPT_CONTENT_FROM_FILE = ""
+
+    except FileNotFoundError:
+        app_logger.warning(
+            f"Web app file not found: {web_app_file_to_use}. Using empty content."
+        )
+    except Exception:
+        app_logger.exception(f"Error reading web app file '{web_app_file_to_use}':")
+        app_logger.warning("Proceeding with empty content due to error.")
+
+    # Extract MCP servers from webapp file if present
+    if webapp_yaml_data.get("mcp_servers"):
+        # Resolve {{WEB_APP_DIR}} sentinel in MCP server arguments
+        web_app_dir = os.path.dirname(os.path.abspath(web_app_file_to_use))
+        mcp_servers_data = webapp_yaml_data["mcp_servers"]
+
+        # Expect list format for mcp_servers
+        if not isinstance(mcp_servers_data, list):
+            app_logger.error(
+                f"MCP servers configuration must be a list, got {type(mcp_servers_data).__name__}. "
+                "Please update your webapp file to use list format."
+            )
+            exit(1)
+
+        for server_config in mcp_servers_data:
+            if "args" in server_config and isinstance(server_config["args"], list):
+                server_config["args"] = [
+                    str(arg).replace("{{WEB_APP_DIR}}", web_app_dir)
+                    for arg in server_config["args"]
+                ]
+            if server_config.get("cwd"):
+                server_config["cwd"] = str(server_config["cwd"]).replace(
+                    "{{WEB_APP_DIR}}", web_app_dir
+                )
+            if "env" in server_config and isinstance(server_config["env"], dict):
+                for key, value in server_config["env"].items():
+                    server_config["env"][key] = str(value).replace(
+                        "{{WEB_APP_DIR}}", web_app_dir
+                    )
+
+        config["MCP_SERVERS"] = json.dumps(mcp_servers_data)
+        app_logger.info(
+            f"Loaded {len(mcp_servers_data)} MCP server(s) from webapp file"
+        )
+    else:
+        config["MCP_SERVERS"] = None
+        app_logger.info("No MCP servers configured")
+
+    # Store webapp metadata for later use
+    config["WEBAPP_METADATA"] = webapp_yaml_data
+
+    # Prepare dynamic examples for the LLM server prompt
+    jinja_ready_llm_server_prompt = LLM_HTTP_SERVER_PROMPT_BASE
 
     if WEB_APP_PROMPT_CONTENT_FROM_FILE.strip():
         web_app_rules_section_content = WEB_APP_PROMPT_CONTENT_FROM_FILE.strip()
+        # Wrap user-provided content in {% raw %} to prevent it from being templated by Jinja2
+        system_prompt_template = (
+            f"{jinja_ready_llm_server_prompt.strip()}\n\n"
+            "<web_application_rules>\n"
+            "{% raw %}\n"
+            f"{web_app_rules_section_content}\n"
+            "{% endraw %}\n"
+            "</web_application_rules>"
+        )
     else:
-        web_app_rules_section_content = DEFAULT_WEB_APP_TECHNICAL_RULES.strip()
+        # If no content was loaded (error case), just use the base prompt
+        system_prompt_template = jinja_ready_llm_server_prompt.strip()
 
-    config["SYSTEM_PROMPT"] = f"""{formatted_llm_server_prompt.strip()}
+    config["SYSTEM_PROMPT_TEMPLATE"] = system_prompt_template
+    config["WEB_APP_RULES"] = WEB_APP_PROMPT_CONTENT_FROM_FILE
 
-<web_application_rules>
-{web_app_rules_section_content}
-</web_application_rules>"""
+    model_name = (
+        args.model
+        if args.model is not None
+        else get_env("OPENAI_MODEL_NAME", DEFAULT_OPENAI_MODEL_NAME)
+    )
 
-    try:
-        client_args = {"api_key": config["API_KEY"]}
-        if config["OPENAI_BASE_URL"]:
-            client_args["base_url"] = config["OPENAI_BASE_URL"]
-        config["openai_client"] = openai.AsyncOpenAI(**client_args)
-        app_logger.info(
-            f"OpenAI client initialized. Using API Key: {'*' * (len(config['API_KEY']) - 4) + config['API_KEY'][-4:] if config['API_KEY'] and len(config['API_KEY']) > 4 else 'Provided'}. "
-            f"Model: {config['OPENAI_MODEL_NAME']}. Base URL: {config['OPENAI_BASE_URL'] if config['OPENAI_BASE_URL'] else 'Default OpenAI'}. Temperature: {config['OPENAI_TEMPERATURE']}"
-        )
-    except Exception:
-        app_logger.exception("Error initializing OpenAI client:")
-        app_logger.error(
-            "Please ensure your API key and base URL (if provided) are valid and the openai library is installed."
-        )
-        exit(1)
+    config["OPENAI_MODEL_NAME"] = model_name
+    config["OPENAI_TEMPERATURE"] = (
+        args.temperature
+        if args.temperature is not None
+        else float(get_env("OPENAI_TEMPERATURE", DEFAULT_OPENAI_TEMPERATURE))
+    )
 
     return config
+
+
+def _parse_webapp_file(file_path):
+    """
+    Parse a markdown file with YAML front matter.
+    Returns a tuple of (yaml_data, markdown_content).
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Check if the file starts with YAML front matter
+        if content.startswith("---\n"):
+            # Find the end of the YAML front matter
+            match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
+            if match:
+                yaml_content = match.group(1)
+                markdown_content = match.group(2)
+
+                # Parse the YAML
+                yaml_data = yaml.safe_load(yaml_content) if yaml_content.strip() else {}
+
+                return yaml_data, markdown_content.strip()
+            else:
+                # Invalid front matter format
+                app_logger.warning(f"Invalid YAML front matter format in {file_path}")
+                return {}, content
+        else:
+            # No front matter, treat as plain markdown/text
+            return {}, content
+
+    except yaml.YAMLError as e:
+        app_logger.error(f"YAML parsing error in {file_path}: {e}")
+        return {}, ""
+    except Exception as e:
+        app_logger.error(f"Error reading webapp file {file_path}: {e}")
+        return {}, ""
+
+
+async def _initialize_mcp_servers_and_agent(config, app: web.Application):
+    """
+    Initialize MCP servers based on configuration and create an agent with them.
+    Returns the configured agent and run config.
+    """
+    mcp_servers = []
+
+    if config.get("MCP_SERVERS"):
+        try:
+            mcp_configs = json.loads(config["MCP_SERVERS"])
+            app_logger.info(f"Initializing {len(mcp_configs)} MCP server(s)")
+
+            for mcp_config in mcp_configs:
+                server_type = mcp_config.get("type", "stdio").lower()
+
+                if server_type == "stdio":
+                    stdio_params = {
+                        "command": mcp_config["command"],
+                        "args": mcp_config.get("args", []),
+                    }
+                    if "cwd" in mcp_config:
+                        stdio_params["cwd"] = mcp_config["cwd"]
+                    if "env" in mcp_config:
+                        stdio_params["env"] = mcp_config["env"]
+
+                    server = MCPServerStdio(params=stdio_params, cache_tools_list=True)
+                elif server_type == "sse":
+                    server = MCPServerSse(
+                        params={"url": mcp_config["url"]}, cache_tools_list=True
+                    )
+                elif server_type == "streamable_http":
+                    server = MCPServerStreamableHttp(
+                        params={"url": mcp_config["url"]}, cache_tools_list=True
+                    )
+                else:
+                    app_logger.warning(
+                        f"Unknown MCP server type: {server_type}, skipping"
+                    )
+                    continue
+
+                await server.connect()
+                tools = await server.list_tools()
+
+                if tools:
+                    app_logger.info(
+                        f"Added and connected to MCP server: {server_type} - {mcp_config}"
+                    )
+                    tool_names = sorted([t.name for t in tools])
+                    app_logger.info(f"  └─ Discovered tools: {tool_names}")
+                    mcp_servers.append(server)
+                else:
+                    app_logger.warning(
+                        f"MCP server {server_type} - {mcp_config} did not provide any tools and will be ignored."
+                    )
+                    # Disconnect if we are not going to use it
+                    await server.disconnect()
+
+        except json.JSONDecodeError as e:
+            app_logger.error(f"Invalid JSON in MCP_SERVERS configuration: {e}")
+        except Exception as e:
+            app_logger.exception(f"Error initializing MCP servers: {e}")
+
+    # Define local tools for global state
+    global_state = app["global_state"]
+
+    def set_global_state(key: str, value: str):
+        """
+        Stores a string value in a global, server-side dictionary. This state persists across all sessions and requests.
+        To store complex objects like booleans, numbers, or JSON, you must convert them to a string before calling this tool.
+        For example, to store that an initialization is done, you could set the key 'db_initialized' to the string 'true'.
+
+        :param key: The key under which to store the value.
+        :param value: The string value to store.
+        """
+        global_state[key] = value
+        app_logger.info(f"Global state set: {key} = {value}")
+        return f"Value for '{key}' has been set."
+
+    def get_global_state(key: str) -> str:
+        """
+        Retrieves a string value from the global, server-side dictionary.
+        If a value was stored, it will be returned as a string. If the key does not exist, it returns an empty string.
+
+        :param key: The key of the value to retrieve.
+        :return: The stored string value, or an empty string if the key does not exist.
+        """
+        value = global_state.get(key, "")
+        app_logger.info(f"Global state retrieved: {key} -> {value}")
+        return value
+
+    # Manually create FunctionTool objects
+    # This avoids the decorator issues with type hints.
+    from agents.function_schema import function_schema
+
+    set_state_schema = function_schema(set_global_state)
+    get_state_schema = function_schema(get_global_state)
+
+    async def _invoke_set_state(ctx, args_json):
+        args = json.loads(args_json)
+        return set_global_state(key=args["key"], value=args["value"])
+
+    async def _invoke_get_state(ctx, args_json):
+        args = json.loads(args_json)
+        return get_global_state(key=args["key"])
+
+    local_tools = [
+        FunctionTool(
+            name=set_state_schema.name,
+            description=set_state_schema.description,
+            params_json_schema=set_state_schema.params_json_schema,
+            on_invoke_tool=_invoke_set_state,
+        ),
+        FunctionTool(
+            name=get_state_schema.name,
+            description=get_state_schema.description,
+            params_json_schema=get_state_schema.params_json_schema,
+            on_invoke_tool=_invoke_get_state,
+        ),
+    ]
+
+    # Create model - either default or custom client
+    if config.get("OPENAI_BASE_URL"):
+        # Use custom OpenAI client for providers like OpenRouter
+        # Following the official pattern from:
+        # https://github.com/openai/openai-agents-python/blob/main/examples/model_providers/custom_example_provider.py
+        custom_client = AsyncOpenAI(
+            api_key=config.get("API_KEY"),
+            base_url=config.get("OPENAI_BASE_URL"),
+        )
+        model = OpenAIChatCompletionsModel(
+            model=config["OPENAI_MODEL_NAME"], openai_client=custom_client
+        )
+
+        # Disable tracing since we're not using platform.openai.com
+        # This prevents 401 errors when trying to upload traces
+        set_tracing_disabled(disabled=True)
+
+        app_logger.info(
+            f"Using custom OpenAI client with base_url: {config.get('OPENAI_BASE_URL')}"
+        )
+        app_logger.info("Tracing disabled for custom provider")
+    else:
+        # Use default model name for standard OpenAI
+        model = config["OPENAI_MODEL_NAME"]
+
+    # Create agent with MCP servers
+    agent = Agent(
+        name="HTTP LLM Server Agent",
+        instructions="You are an LLM powering an HTTP server. Use available tools to enhance your responses when appropriate.",
+        model=model,
+        model_settings=ModelSettings(
+            temperature=config["OPENAI_TEMPERATURE"],
+            include_usage=True,
+        ),
+        mcp_servers=mcp_servers,
+        tools=local_tools,
+    )
+
+    app_logger.info(
+        f"Agent initialized with {len(mcp_servers)} MCP server(s) and {len(local_tools)} local tool(s)"
+    )
+    return agent
 
 
 # Ensure these helpers are defined before handle_http_request
@@ -497,22 +814,106 @@ async def _get_raw_request_aiohttp(request: web.Request) -> str:
 async def _send_llm_error_response_aiohttp(
     request: web.Request, status_code: int, message: str, error_details: str = ""
 ) -> web.Response:
-    """Sends a generic HTML error response if the LLM interaction fails, for aiohttp."""
-    error_details_html = (
-        error_details.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    )
-    html_body = f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>Server Error: {message}</title><style>body {{font-family: sans-serif; margin:20px;}} h1 {{color: #cc0000;}} .details {{background-color: #f0f0f0; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word;}}</style></head>
-<body><h1>HTTP {status_code} - {message}</h1><p class="details">{error_details_html}</p></body>
-</html>"""
-    return web.Response(
-        text=html_body,
-        status=status_code,
-        content_type="text/html",
-        charset="utf-8",
-        headers={"Connection": "close"},
-    )
+    """
+    Sends an error response. Tries to generate a styled error page via LLM,
+    but falls back to a static template if it fails.
+    """
+
+    async def _fallback_response():
+        # This is the old, reliable static template method
+        html_body = ERROR_PAGE_TEMPLATE.render(
+            status_code=status_code,
+            message=message,
+            error_details=error_details,
+        )
+        return web.Response(
+            text=html_body,
+            status=status_code,
+            content_type="text/html",
+            charset="utf-8",
+            headers={"Connection": "close"},
+        )
+
+    agent = request.app.get("agent")
+    web_app_rules = request.app.get("web_app_rules")
+
+    if not agent or not web_app_rules:
+        app_logger.warning(
+            "Agent or web_app_rules not available for LLM-generated error page. Falling back to static."
+        )
+        return await _fallback_response()
+
+    try:
+        app_logger.info(
+            f"Attempting to generate a styled error page with LLM for status {status_code}..."
+        )
+
+        # 1. Construct the prompt for the LLM
+        template = jinja2.Template(ERROR_LLM_SYSTEM_PROMPT_TEMPLATE)
+        error_system_prompt = template.render(
+            status_code=status_code,
+            message=message,
+            error_details=error_details,
+            web_app_rules=web_app_rules,
+        )
+
+        messages = [
+            {"role": "system", "content": error_system_prompt},
+            {
+                "role": "user",
+                "content": f"Please generate the HTTP response for the {status_code} error page now.",
+            },
+        ]
+
+        # 2. Call the LLM (not streamed, as error pages should be small)
+        output_item = await Runner.run(agent, messages)
+
+        if not isinstance(output_item, MessageOutputItem) or not output_item.content:
+            app_logger.error(
+                "LLM did not return a valid MessageOutputItem for the error page. Falling back to static."
+            )
+            return await _fallback_response()
+
+        llm_response_text = output_item.content
+        app_logger.info("Successfully received styled error page from LLM.")
+
+        # 3. Parse the raw HTTP response from the LLM
+        separator = None
+        if "\r\n\r\n" in llm_response_text:
+            separator = "\r\n\r\n"
+        elif "\n\n" in llm_response_text:
+            separator = "\n\n"
+
+        if not separator:
+            app_logger.error(
+                "LLM-generated error page response is missing header-body separator. Falling back to static."
+            )
+            return await _fallback_response()
+
+        header_section, body = llm_response_text.split(separator, 1)
+
+        lines = header_section.split("\n")
+        llm_headers = {}
+        # Status line is informational, we use the status_code passed to the function for reliability
+        if lines:
+            for line in lines[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    llm_headers[key.strip()] = value.strip()
+
+        # 4. Create and return the aiohttp response
+        return web.Response(
+            text=body,
+            status=status_code,
+            content_type=llm_headers.get("Content-Type", "text/html; charset=utf-8"),
+            headers=llm_headers,
+        )
+
+    except Exception as e:
+        app_logger.exception(
+            f"Failed to generate LLM error page, falling back to static template: {e}"
+        )
+        return await _fallback_response()
 
 
 async def handle_http_request(request: web.Request) -> web.StreamResponse:
@@ -569,42 +970,69 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             f"[{client_address_str}] No valid session ID in request. Server generated new session ID for history: {server_generated_session_id_for_history}"
         )
 
-    messages = []
+    history_messages = []
     if server_generated_session_id_for_history:
         history = await current_session_store.get_history(
             server_generated_session_id_for_history
         )  # Use new store
         for turn in history:
-            messages.append(
+            history_messages.append(
                 {"role": turn["role"], "content": str(turn.get("content", ""))}
             )
+
+    system_prompt_template = request.app["system_prompt_template"]
+    agent = request.app["agent"]
+    global_state = request.app["global_state"]
+    max_turns = request.app["max_turns"]
+
+    # Build dynamic system prompt with session context using Jinja2
+    session_history_count = len(history_messages)
+
+    # Create the context for rendering the Jinja2 template
+    jinja_context = {
+        "session_id": server_generated_session_id_for_history,
+        "is_new_session": str(new_session_id_generated_by_server).lower(),
+        "session_history_count": str(session_history_count),
+        "global_state": json.dumps(global_state),
+        "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),
+        "dynamic_server_name_example": "LLMWebServer/0.1",  # Matches constant used before
+    }
+
+    # Render the final system prompt
+    try:
+        template = jinja2.Template(system_prompt_template)
+        dynamic_system_prompt = template.render(jinja_context)
+    except jinja2.exceptions.TemplateSyntaxError as e:
+        app_logger.exception(f"Jinja2 template syntax error in the system prompt: {e}")
+        # Fallback or error response
+        return await _send_llm_error_response_aiohttp(
+            request,
+            500,
+            "Server Configuration Error",
+            "Invalid system prompt template.",
+        )
+
+    # The conversation history now includes the system prompt
+    messages = [{"role": "system", "content": dynamic_system_prompt}]
+    messages.extend(history_messages)
     messages.append({"role": "user", "content": raw_request_text})
 
-    system_prompt = request.app["system_prompt"]
-    openai_client = request.app["openai_client"]
-    model_name = request.app["openai_model_name"]
-    temperature = request.app["openai_temperature"]
-    
-    # Build dynamic system prompt with session context
-    session_history_count = len(messages) - 1  # Subtract 1 for the current user message
-    
-    # Replace the session context placeholders in the system prompt
-    # Note: The initial format() call converts {{session_id}} to {session_id}
-    dynamic_system_prompt = system_prompt.replace("{session_id}", server_generated_session_id_for_history)
-    dynamic_system_prompt = dynamic_system_prompt.replace("{is_new_session}", str(new_session_id_generated_by_server).lower())
-    dynamic_system_prompt = dynamic_system_prompt.replace("{session_history_count}", str(session_history_count))
-    
     # Debug logging to see what session context is being passed
     app_logger.info(
         f"[{client_address_str}] Session context: ID={server_generated_session_id_for_history}, "
         f"IsNew={new_session_id_generated_by_server}, HistoryCount={session_history_count}"
     )
-    
+
     # Debug: Show a snippet of the system prompt to verify session context injection
-    session_context_snippet = dynamic_system_prompt[dynamic_system_prompt.find("**Current Session Context:**"):dynamic_system_prompt.find("**Current Session Context:**") + 200]
-    app_logger.debug(f"[{client_address_str}] System prompt session context snippet: {session_context_snippet}")
-    
-    full_prompt_messages = [{"role": "system", "content": dynamic_system_prompt}] + messages
+    session_context_snippet = dynamic_system_prompt[
+        dynamic_system_prompt.find("**Current Session Context:**") :
+    ]
+    app_logger.debug(
+        f"[{client_address_str}] System prompt session context snippet: {session_context_snippet}"
+    )
+
+    # System prompt is now part of the message history, no need to set instructions
+    agent.instructions = None
 
     # --- LLM Interaction and Response Handling ---
     llm_call_start_time = None
@@ -616,169 +1044,168 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     prompt_tokens_from_usage = 0
     completion_tokens_from_usage = 0
 
+    response = None  # Define here for access in except/finally blocks
+
     try:
         llm_call_start_time = time.perf_counter()
-        llm_stream = await openai_client.chat.completions.create(
-            model=model_name,
-            messages=full_prompt_messages,
-            temperature=temperature,
-            stream=True,
+        app_logger.info(f"[{client_address_str}] Processing LLM request...")
+
+        # The `messages` variable now holds the complete conversation history,
+        # including the current raw HTTP request as the final user message.
+        # The Agent's Runner expects this list as the input for multi-turn conversations.
+        # We use `run_streamed` to get a streaming response.
+        agent_stream = Runner.run_streamed(
+            agent,
+            messages,
+            max_turns=max_turns,
         )
 
-        # Stream LLM response with header parsing
-        llm_buffer = ""
-        headers_parsed = False
-        llm_status_code = 200
-        llm_headers = {}
-        response = None
-        
-        async for chunk in llm_stream:
-            # Always check for usage on the chunk object itself and update if present.
-            if chunk.usage:
-                app_logger.debug(
-                    f"[{client_address_str}] Stream usage reported by API (chunk.usage): {chunk.usage}"
-                )
-                prompt_tokens_from_usage = chunk.usage.prompt_tokens
-                completion_tokens_from_usage = chunk.usage.completion_tokens
+        llm_first_token_time = time.perf_counter()
 
-            if not chunk.choices:
-                continue
+        # Create a response object, but do NOT prepare it yet.
+        # We will parse headers from the LLM stream first.
+        response = web.StreamResponse()
+        response.enable_chunked_encoding(chunk_size=None)
 
-            delta_content = chunk.choices[0].delta.content
-            finish_reason_from_chunk = chunk.choices[0].finish_reason
+        headers_and_status_parsed = False
+        body_buffer = ""
 
-            if finish_reason_from_chunk:
-                _last_chunk_finish_reason = finish_reason_from_chunk
-
-            if delta_content is None:
+        async for event in agent_stream.stream_events():
+            if isinstance(event, RawResponsesStreamEvent):
+                raw_chunk = event.data
                 if (
-                    _last_chunk_finish_reason
-                    and not delta_content
-                    and not llm_response_fully_collected_text_for_log
+                    hasattr(raw_chunk, "response")
+                    and hasattr(raw_chunk.response, "usage")
+                    and raw_chunk.response.usage
                 ):
-                    # LLM refused to respond
-                    app_logger.warning(
-                        f"[{client_address_str}] LLM stream ended with finish_reason '{_last_chunk_finish_reason}' before any content was generated."
+                    usage = raw_chunk.response.usage
+                    app_logger.info(
+                        f"[{client_address_str}] Usage found in stream chunk: {usage}"
                     )
-                    model_error_indicator_for_recording = f"LLM_REFUSED_TO_RESPOND_FINISH_REASON_{_last_chunk_finish_reason}"
-                    llm_response_fully_collected_text_for_log = (
-                        f"[LLM_REFUSED_RESPONSE: {_last_chunk_finish_reason}]"
-                    )
-                    break
-                elif not delta_content:
-                    continue
+                    prompt_tokens_from_usage += usage.input_tokens
+                    completion_tokens_from_usage += usage.output_tokens
 
-            if llm_first_token_time is None and delta_content.strip():
-                llm_first_token_time = time.perf_counter()
+            if isinstance(event, RunItemStreamEvent):
+                app_logger.debug(
+                    f"[{client_address_str}] Stream event: {event.name} ({type(event.item)})"
+                )
 
-            llm_response_fully_collected_text_for_log += delta_content
+                if event.name in [
+                    "message_chunk_created",
+                    "message_output_created",
+                ]:
+                    chunk = ""
+                    item = event.item
+                    if hasattr(item, "chunk"):  # for message_chunk_created
+                        if hasattr(item.chunk, "text"):
+                            chunk = item.chunk.text
+                    elif hasattr(item, "raw_item"):  # for message_output_created
+                        if isinstance(item.raw_item.content, list):
+                            for part in item.raw_item.content:
+                                if hasattr(part, "text"):
+                                    chunk = part.text
+                                    break
+                        elif hasattr(item.raw_item, "content"):
+                            chunk = str(item.raw_item.content)
 
-            if not headers_parsed:
-                llm_buffer += delta_content
-                
-                # Look for end of headers (double newline)
-                if "\r\n\r\n" in llm_buffer:
-                    header_end = llm_buffer.find("\r\n\r\n")
-                    headers_section = llm_buffer[:header_end]
-                    body_start = llm_buffer[header_end + 4:]
-                    headers_parsed = True
-                elif "\n\n" in llm_buffer:
-                    header_end = llm_buffer.find("\n\n")
-                    headers_section = llm_buffer[:header_end]
-                    body_start = llm_buffer[header_end + 2:]
-                    headers_parsed = True
-                
-                if headers_parsed:
-                    # Parse status line and headers
-                    lines = headers_section.split('\n')
-                    if lines:
-                        # Parse status line (e.g., "HTTP/1.1 200 OK")
-                        status_line = lines[0].strip()
-                        if status_line.startswith("HTTP/"):
-                            try:
-                                parts = status_line.split(' ', 2)
-                                if len(parts) >= 2:
-                                    llm_status_code = int(parts[1])
-                            except ValueError:
-                                app_logger.warning(f"[{client_address_str}] Invalid status code in LLM response: {status_line}")
-                        
-                        # Parse headers
-                        for line in lines[1:]:
-                            line = line.strip()
-                            if ':' in line:
-                                key, value = line.split(':', 1)
-                                llm_headers[key.strip()] = value.strip()
-                    
-                    # Create StreamResponse with parsed status and headers
-                    response = web.StreamResponse(status=llm_status_code)
-                    
-                    # Set headers from LLM (excluding ones aiohttp manages)
-                    for key, value in llm_headers.items():
-                        if key.lower() not in ['content-length', 'transfer-encoding', 'connection']:
-                            response.headers[key] = value
-                    
-                    # Prepare the response
-                    await response.prepare(request)
-                    
-                    # Write any body content we already have
-                    if body_start:
-                        await response.write(body_start.encode('utf-8'))
+                    if not chunk:
+                        continue
+
+                    llm_response_fully_collected_text_for_log += chunk
+
+                    if headers_and_status_parsed:
+                        await response.write(chunk.encode("utf-8"))
+                        continue
+
+                    # Buffer until we have the full header
+                    body_buffer += chunk
+
+                    separator = None
+                    if "\r\n\r\n" in body_buffer:
+                        separator = "\r\n\r\n"
+                    elif "\n\n" in body_buffer:
+                        separator = "\n\n"
+
+                    if separator:
+                        header_section, body_part = body_buffer.split(separator, 1)
+                        headers_and_status_parsed = True
+
+                        # Parse status line and headers
+                        lines = header_section.split("\n")
+                        llm_status_code = 200
+                        llm_headers = {}
+                        if lines:
+                            status_line = lines[0].strip()
+                            if status_line.startswith("HTTP/"):
+                                try:
+                                    parts = status_line.split(" ", 2)
+                                    if len(parts) >= 2:
+                                        llm_status_code = int(parts[1])
+                                except (ValueError, IndexError):
+                                    app_logger.warning(
+                                        f"Invalid status line: {status_line}"
+                                    )
+                            for line in lines[1:]:
+                                if ":" in line:
+                                    key, value = line.split(":", 1)
+                                    llm_headers[key.strip()] = value.strip()
+
+                        # Now that we have headers, prepare the response and send them
+                        response.set_status(llm_status_code)
+                        for k, v in llm_headers.items():
+                            response.headers[k] = v
+                        await response.prepare(request)
+                        app_logger.info(
+                            f"[{client_address_str}] Parsed HTTP headers from LLM, streaming response."
+                        )
+
+                        # Write the first part of the body that was already in the buffer
+                        if body_part:
+                            await response.write(body_part.encode("utf-8"))
             else:
-                # Headers already parsed, stream body content
-                if response:
-                    await response.write(delta_content.encode('utf-8'))
+                app_logger.debug(
+                    f"[{client_address_str}] Stream event: {type(event).__name__}"
+                )
 
         llm_stream_end_time = time.perf_counter()
 
-        # Ensure we have a response object
-        if not response:
-            # Fallback if no headers were parsed
-            response = web.Response(
-                text=llm_response_fully_collected_text_for_log,
-                content_type='text/plain',
-                charset='utf-8'
+        # If the stream finishes and we haven't sent a response, it means the agent
+        # produced no valid HTTP response.
+        if not response.prepared:
+            app_logger.warning(
+                f"[{client_address_str}] LLM stream finished without a valid HTTP response header."
             )
+            return await _send_llm_error_response_aiohttp(
+                request,
+                500,
+                "Internal Server Error",
+                "LLM did not produce a valid HTTP response.",
+            )
+        else:
+            await response.write_eof()
+            app_logger.info(
+                f"[{client_address_str}] Successfully streamed full LLM response."
+            )
+            return response
 
-    except openai.APIConnectionError as e:
-        app_logger.exception(f"[{client_address_str}] OpenAI API Connection Error:")
-        model_error_indicator_for_recording = "API_CONNECTION_ERROR"
-        llm_response_fully_collected_text_for_log = f"ERROR_API_CONNECTION: {e}"
-        return await _send_llm_error_response_aiohttp(
-            request, 503, "LLM Service Unavailable", f"API Connection Error: {e}"
-        )
-    except openai.APIStatusError as e:
-        app_logger.exception(
-            f"[{client_address_str}] OpenAI API Status Error (code {e.status_code}): {e.message}"
-        )
-        model_error_indicator_for_recording = f"API_STATUS_ERROR_{e.status_code}"
-        llm_response_fully_collected_text_for_log = (
-            f"ERROR_API_STATUS_{e.status_code}: {e.message}"
-        )
-        return await _send_llm_error_response_aiohttp(
-            request,
-            e.status_code if e.status_code else 500,
-            "LLM API Error",
-            f"API Error: {e.message}",
-        )
-    except openai.APIError as e:
-        app_logger.exception(f"[{client_address_str}] OpenAI API Generic Error:")
-        model_error_indicator_for_recording = "API_GENERIC_ERROR"
-        llm_response_fully_collected_text_for_log = f"ERROR_API_GENERIC: {e}"
-        return await _send_llm_error_response_aiohttp(
-            request, 500, "LLM Service Error", f"Generic API Error: {e}"
-        )
     except Exception:
         app_logger.exception(
             f"[{client_address_str}] Unexpected error processing LLM stream:"
         )
         model_error_indicator_for_recording = "UNEXPECTED_STREAM_PROCESSING_ERROR"
         llm_response_fully_collected_text_for_log = "ERROR_UNEXPECTED_STREAM_PROCESSING"
-        return await _send_llm_error_response_aiohttp(
-            request,
-            500,
-            "Internal Server Error",
-            "Unexpected error during stream processing.",
-        )
+
+        # If headers have not been sent, we can return a proper error response.
+        if response and not response.prepared:
+            return await _send_llm_error_response_aiohttp(
+                request,
+                500,
+                "Internal Server Error",
+                "Unexpected error during stream processing.",
+            )
+
+        # Otherwise, the connection is likely broken. The client will see a broken stream.
+        return response
     finally:
         # Record conversation history (always in memory for session context, optionally to disk)
         if server_generated_session_id_for_history:
@@ -808,7 +1235,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         duration = end_time - start_time
         ttft_str = "N/A"
         duration_llm_stream_str = "N/A"
-        
+
         llm_ttft_seconds_val = None
         if llm_call_start_time and llm_first_token_time:
             ttft_calc = llm_first_token_time - llm_call_start_time
@@ -840,7 +1267,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             elif llm_stream_duration_seconds_val == 0:
                 if completion_tokens_from_usage > 0:
                     compl_tokens_per_sec_str = "Infinity"
-                    compl_tokens_per_sec_val = float('inf')
+                    compl_tokens_per_sec_val = float("inf")
                 else:
                     compl_tokens_per_sec_str = "0.00 (no tokens, instantaneous)"
                     compl_tokens_per_sec_val = 0.0
@@ -852,45 +1279,81 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             f"Sess: {server_generated_session_id_for_history}/{final_session_id_for_logging}, NewSrvSess: {new_session_id_generated_by_server}, "
             f"FinishReason: {_last_chunk_finish_reason if _last_chunk_finish_reason else 'N/A'}."
         )
-        
+
         access_log_extra = {
             "client_address": client_address_str,
             "total_duration_seconds": round(duration, 3),
-            "llm_ttft_seconds": round(llm_ttft_seconds_val, 3) if llm_ttft_seconds_val is not None else None,
-            "llm_stream_duration_seconds": round(llm_stream_duration_seconds_val, 3) if llm_stream_duration_seconds_val is not None else None,
+            "llm_ttft_seconds": round(llm_ttft_seconds_val, 3)
+            if llm_ttft_seconds_val is not None
+            else None,
+            "llm_stream_duration_seconds": round(llm_stream_duration_seconds_val, 3)
+            if llm_stream_duration_seconds_val is not None
+            else None,
             "prompt_tokens": prompt_tokens_from_usage,
             "completion_tokens": completion_tokens_from_usage,
-            "completion_tokens_per_second": round(compl_tokens_per_sec_val, 2) if compl_tokens_per_sec_val is not None and compl_tokens_per_sec_val != float('inf') else compl_tokens_per_sec_val,
+            "completion_tokens_per_second": round(compl_tokens_per_sec_val, 2)
+            if compl_tokens_per_sec_val is not None
+            and compl_tokens_per_sec_val != float("inf")
+            else compl_tokens_per_sec_val,
             "session_hkey": server_generated_session_id_for_history,
             "session_log_id": final_session_id_for_logging,
             "new_session_by_server": new_session_id_generated_by_server,
             "http_method": request.method,
             "http_path_qs": request.path_qs,
-            "llm_finish_reason": _last_chunk_finish_reason
+            "llm_finish_reason": _last_chunk_finish_reason,
         }
 
         log_msg_final = log_msg_main_part
         if model_error_indicator_for_recording:
             access_log_extra["error_indicator"] = model_error_indicator_for_recording
-            access_log_extra['llm_raw_response_on_error'] = llm_response_fully_collected_text_for_log
+            access_log_extra["llm_raw_response_on_error"] = (
+                llm_response_fully_collected_text_for_log
+            )
             log_msg_final += f" Error: {model_error_indicator_for_recording}."
 
         access_logger.info(log_msg_final, extra=access_log_extra)
-        
-    return response
 
 
 async def on_startup(app: web.Application):
     """Async operations to perform on server startup."""
-    # If any async init for client or other resources is needed, do it here.
-    # For now, client is initialized synchronously in _initialize_configuration_and_client
-    # and stored in app context.
+    # Initialize MCP servers and agent
+    config = {
+        "OPENAI_MODEL_NAME": app["openai_model_name"],
+        "OPENAI_TEMPERATURE": app["openai_temperature"],
+        "MCP_SERVERS": app.get("webapp_mcp_servers"),
+        "OPENAI_BASE_URL": app.get("openai_base_url"),
+        "API_KEY": app.get("api_key"),
+    }
+
+    agent = await _initialize_mcp_servers_and_agent(config, app)
+    app["agent"] = agent
+
     app_logger.info("Server startup actions completed.")
 
 
 async def on_shutdown(app: web.Application):
     """Async operations to perform on server shutdown."""
     app_logger.info("\nServer shutting down (async)...")
+
+    # Disconnect from MCP servers
+    agent = app.get("agent")
+    if agent and agent.mcp_servers:
+        app_logger.info(f"Disconnecting from {len(agent.mcp_servers)} MCP server(s)...")
+        for server in agent.mcp_servers:
+            try:
+                await server.cleanup()
+                app_logger.info(f"Disconnected from MCP server: {server.name}")
+            except RuntimeError as e:
+                # This can happen on forceful shutdown with Ctrl+C, it's a known issue
+                # with anyio's cancel scopes when not exited in the same task.
+                # We log it as a warning because the shutdown will likely continue anyway.
+                app_logger.warning(
+                    f"Ignoring cancel scope error during shutdown for {server.name}: {e}"
+                )
+            except Exception as e:
+                app_logger.exception(
+                    f"Error disconnecting from MCP server {server.name}: {e}"
+                )
 
     log_directory = "conversation_logs"
     current_session_store: AbstractSessionStore = app[
@@ -899,14 +1362,6 @@ async def on_shutdown(app: web.Application):
     await current_session_store.save_all_sessions_on_shutdown(
         log_directory
     )  # Use new store (will handle conditional saving internally)
-
-    # Close OpenAI client if it has an async close method (AsyncOpenAI does)
-    if app.get("openai_client") and hasattr(app["openai_client"], "close"):
-        try:
-            await app["openai_client"].close()
-            app_logger.info("Async OpenAI client closed.")
-        except Exception:
-            app_logger.exception("Error closing Async OpenAI client:")
 
     app_logger.info("Server shutdown actions completed.")
 
@@ -919,14 +1374,19 @@ def run_server():
     session_store = InMemorySessionStore(save_to_disk=config["SAVE_CONVERSATIONS"])
 
     app = web.Application()
+    app["global_state"] = {}
     # Store config and client in app context for handler access
-    app["system_prompt"] = config["SYSTEM_PROMPT"]
-    app["openai_client"] = config["openai_client"]
+    app["system_prompt_template"] = config["SYSTEM_PROMPT_TEMPLATE"]
     app["openai_model_name"] = config["OPENAI_MODEL_NAME"]
     app["openai_temperature"] = config["OPENAI_TEMPERATURE"]
     app["port"] = config["PORT"]
     app["save_conversations"] = config["SAVE_CONVERSATIONS"]
     app["session_store"] = session_store  # Add session_store to app context
+    app["api_key"] = config["API_KEY"]
+    app["openai_base_url"] = config.get("OPENAI_BASE_URL")
+    app["webapp_mcp_servers"] = config.get("MCP_SERVERS")
+    app["max_turns"] = config["MAX_TURNS"]
+    app["web_app_rules"] = config.get("WEB_APP_RULES", "")
 
     app.router.add_route(
         "*", "/{path:.*}", handle_http_request
@@ -944,7 +1404,8 @@ def run_server():
     app_logger.info(
         f"Configuration: API Key: {'Set' if config['API_KEY'] else 'NOT SET (REQUIRED!)'}, "
         f"Base URL: {config['OPENAI_BASE_URL'] or 'Default'}, Model: {config['OPENAI_MODEL_NAME']}, Temp: {config['OPENAI_TEMPERATURE']}, "
-        f"Web App File: {config['WEB_APP_FILE'] or 'Not set'}, Save Conversations: {config['SAVE_CONVERSATIONS']}"
+        f"Max Turns: {config['MAX_TURNS']}, "
+        f"Web App File: {config.get('WEB_APP_FILE') or 'Default (examples/default_info_site/prompt.md)'}, Save Conversations: {config['SAVE_CONVERSATIONS']}"
     )
     app_logger.info(
         f"To override, use command-line arguments (e.g., --port {port_to_use}) or environment variables."

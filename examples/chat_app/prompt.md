@@ -109,21 +109,7 @@ The server must distinguish between two types of requests to provide appropriate
 **JavaScript AJAX Implementation Requirements:**
 When sending messages from the SPA, ensure all requests include the proper headers:
 
-```javascript
-// Required headers for AJAX requests
-const response = await fetch('/', {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-Chat-App-Request': 'message'
-    },
-    body: `usermsg=${encodeURIComponent(message)}`
-});
-
-// Handle response as plain text
-const assistantResponse = await response.text();
-```
+When sending a message, the application should make a `fetch` request to the server's root path (`/`) using the `POST` method. The request must include the following headers: `Content-Type: application/x-www-form-urlencoded`, `X-Requested-With: XMLHttpRequest`, and a custom header `X-Chat-App-Request: message`. The message content should be URL-encoded and sent in the request body (e.g., `usermsg=...`). The response from the server will be plain text and should be processed accordingly.
 
 **Local Storage Operations:**
 1.  **Message Storage:**
