@@ -18,14 +18,16 @@ classifiers = [
 ]
 dependencies = [
     "openai>=1.82.1",
-    "openai-agents>=0.0.17",
     "aiohttp>=3.9.5",
     "ruff>=0.4.4",
     "python-json-logger>=2.0.0",
     "rich>=13.0.0",
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.1",
+    "uvicorn>=0.30.1",
     "python-dotenv>=1.0.1",
-    "jinja2",
+    "jinja2>=3.1.4",
+    "openai-agents",
+    "mcp",
 ]
 
 [project.scripts]

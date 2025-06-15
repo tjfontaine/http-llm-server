@@ -29,11 +29,17 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from email.utils import formatdate
+from typing import AsyncContextManager
 
+import jinja2
+import mcp.types as types
 import yaml
 from agents import (
     Agent,
@@ -43,17 +49,20 @@ from agents import (
     set_tracing_disabled,
 )
 from agents.items import MessageOutputItem
-from agents.mcp import MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
+from agents.mcp import (
+    MCPServerSse,
+    MCPServerStdio,
+    MCPServerStreamableHttp,
+)
 from agents.model_settings import ModelSettings
-from agents.stream_events import RunItemStreamEvent, RawResponsesStreamEvent
-from agents.tool import FunctionTool
+from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
+from dotenv import dotenv_values
+from mcp.server.fastmcp.server import Context
+from mcp.server.fastmcp.server import FastMCP as Server
+from mcp.types import CallToolResult, TextContent
 from pythonjsonlogger import jsonlogger
 from rich.logging import RichHandler
-from dotenv import dotenv_values
-import jinja2
-
-from agents.mcp.server import _MCPServerWithClientSession
 
 # Default web app file path
 DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
@@ -73,16 +82,140 @@ class AbstractSessionStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def replace_history(self, session_id: str, history: list[dict]) -> None:
+        """Replace the entire conversation history for a given session ID."""
+        pass
+
+    @abc.abstractmethod
+    async def get_token_count(self, session_id: str) -> int:
+        """Retrieve the token count for the last known state of the history."""
+        pass
+
+    @abc.abstractmethod
+    async def update_token_count(self, session_id: str, count: int) -> None:
+        """Update the token count for the session's history."""
+        pass
+
+    @abc.abstractmethod
     async def save_all_sessions_on_shutdown(self, log_directory: str) -> None:
         """Save all current session histories, typically on server shutdown."""
         pass
 
 
+# --- Local Tools Server Definition (from former local_tools_server.py) ---
+
+# A server instance is created globally, and tools are registered against it.
+local_mcp_server = Server(
+    "local-tools-server",
+    title="Local Tools Server",
+    description="Provides tools for session and state management.",
+)
+
+
+@local_mcp_server.tool()
+async def create_session(context: Context) -> CallToolResult:
+    """
+    Creates a new, unique session identifier.
+    """
+    new_id = str(uuid.uuid4())
+    logging.info(f"Local tool created new session: {new_id}")
+    return CallToolResult(content=[TextContent(type="text", text=new_id)])
+
+
+@local_mcp_server.tool()
+async def set_global_state(context: Context, key: str, value: str) -> CallToolResult:
+    """
+    Stores a string value in a global, server-side dictionary.
+    """
+    global_state = local_mcp_server.global_state
+    global_state[key] = value
+    logging.info(f"Local tool set global state: {key} = {value}")
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Value for '{key}' has been set.")]
+    )
+
+
+@local_mcp_server.tool()
+async def get_global_state(context: Context, key: str) -> CallToolResult:
+    """
+    Retrieves a string value from the global, server-side dictionary.
+    """
+    global_state = local_mcp_server.global_state
+    value = global_state.get(key, "")
+    logging.info(f"Local tool retrieved global state: {key} -> {value}")
+    return CallToolResult(content=[TextContent(type="text", text=value)])
+
+
+@local_mcp_server.tool()
+async def get_conversation_history(context: Context, session_id: str) -> CallToolResult:
+    """
+    Retrieves the full, ordered conversation history for a given session ID.
+    """
+    session_store: AbstractSessionStore = local_mcp_server.session_store
+    history = await session_store.get_history(session_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(history, indent=2))]
+    )
+
+
+@local_mcp_server.tool()
+async def update_session_history(
+    context: Context, session_id: str, new_history_json: str
+) -> CallToolResult:
+    """
+    Replaces the entire conversation history for a session with a new one.
+    """
+    session_store: AbstractSessionStore = local_mcp_server.session_store
+    try:
+        new_history = json.loads(new_history_json)
+        if not isinstance(new_history, list):
+            raise TypeError("JSON must decode to a list of message objects.")
+        await session_store.replace_history(session_id, new_history)
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text", text="Conversation history replaced successfully."
+                )
+            ]
+        )
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"Invalid history format: {e}") from e
+
+
+def create_local_tools_stdio_server(
+    global_state: dict, session_store: AbstractSessionStore
+) -> Server:
+    """
+    Creates the StdioServer application for the local tools.
+    """
+    local_mcp_server.global_state = global_state
+    local_mcp_server.session_store = session_store
+
+    @asynccontextmanager
+    async def lifespan(server_instance: Server) -> AsyncIterator[dict]:
+        """Manage server startup and shutdown, yielding state to the context."""
+        # State is attached directly to the server instance for stdio transport.
+        yield
+
+    local_mcp_server.lifespan = lifespan
+
+    tools_logger = logging.getLogger("local_tools_server")
+    tools_logger.setLevel(logging.INFO)
+    if not tools_logger.handlers:
+        handler = RichHandler(show_path=False)
+        tools_logger.addHandler(handler)
+        tools_logger.propagate = False
+
+    return local_mcp_server
+
+
+# --- Main Application ---
 class InMemorySessionStore(AbstractSessionStore):
     """In-memory implementation of the session store."""
 
     def __init__(self, save_to_disk: bool = True):
         self._histories: dict[str, list[dict]] = {}
+        self._token_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._save_to_disk = save_to_disk
         # Get the logger used elsewhere in the module for consistency
@@ -113,6 +246,35 @@ class InMemorySessionStore(AbstractSessionStore):
             history.append(entry)
             self._conversation_logger.info(  # Changed to use self._conversation_logger
                 f"Recorded '{role}' turn for session_id '{session_id}' via InMemorySessionStore. Total turns: {len(history)}"
+            )
+
+    async def replace_history(self, session_id: str, history: list[dict]) -> None:
+        """Replace the entire conversation history for a given session ID."""
+        if not session_id:
+            self._logger.warning(
+                "Attempted to replace conversation history without a session_id in InMemorySessionStore. History not replaced."
+            )
+            return
+        async with self._lock:
+            self._histories[session_id] = history
+            self._token_counts[session_id] = 0  # Reset token count
+            self._logger.info(
+                f"Replaced history for session '{session_id}'. New history has {len(history)} turn(s). Token count reset."
+            )
+
+    async def get_token_count(self, session_id: str) -> int:
+        """Retrieve the token count for the last known state of the history."""
+        async with self._lock:
+            return self._token_counts.get(session_id, 0)
+
+    async def update_token_count(self, session_id: str, count: int) -> None:
+        """Update the token count for the session's history."""
+        if not session_id:
+            return
+        async with self._lock:
+            self._token_counts[session_id] = count
+            self._logger.info(
+                f"Updated token count for session '{session_id}' to {count}."
             )
 
     async def save_all_sessions_on_shutdown(self, log_directory: str) -> None:
@@ -171,42 +333,32 @@ class InMemorySessionStore(AbstractSessionStore):
 LLM_HTTP_SERVER_PROMPT_BASE = """You are an LLM powering an HTTP server. Your primary function is to generate complete and valid HTTP responses.
 
 **Core Task:**
-Each time you are invoked, you will receive the raw text of an incoming HTTP request, potentially as part of an ongoing conversation history.
-You MUST respond with the complete, raw text of an HTTP response. Your response MUST start *directly* with the HTTP status line (e.g., "HTTP/1.1 200 OK") and nothing else before it. Do NOT use markdown, code fences (like ```http), or any other formatting around your raw HTTP response.
+Each time you are invoked, you will receive the raw text of an incoming HTTP request. You MUST respond with the complete, raw text of an HTTP response, starting directly with the HTTP status line (e.g., "HTTP/1.1 200 OK").
 
-**HTTP Response Structure:**
-Your output MUST be the raw HTTP response itself, starting *immediately* with the status line. There should be no other text or explanation before or after the raw HTTP response.
-1.  A status line (e.g., "HTTP/1.1 200 OK"). This MUST be the very first line of your output.
-2.  One or more header lines (e.g., "Content-Type: text/html; charset=utf-8"). Each header line must be in 'key: value' format.
-3.  A single blank line (CRLF, i.e., "\r\n", or LF, i.e., "\n"). This blank line is ABSOLUTELY CRITICAL and MUST be present to separate headers from the body.
-4.  The HTTP message body (if any).
+**Session and History Management:**
+- **Your Responsibility:** You are entirely responsible for managing the user session. You will be given a Session ID if one exists from a user's cookie. If the Session ID is missing or empty, you MUST create a new one.
+- **Workflow for New Sessions:** If the provided `SESSION_ID` in the context below is empty, you MUST perform these steps *before* generating the main HTTP response:
+    1. Call the `create_session()` tool to generate a new session ID.
+    2. Use this new ID for all subsequent tool calls in this turn (e.g., `get_conversation_history`).
+    3. Your final HTTP response for this request MUST include a `Set-Cookie` header to give the new ID to the user. Example: `Set-Cookie: X-Chat-Session-ID=the-new-id-you-generated; Path=/; HttpOnly; SameSite=Lax`
+- **Workflow for Existing Sessions:** If a `SESSION_ID` is provided, you MUST use it to retrieve the conversation history by calling the `get_conversation_history(session_id)` tool. This history is essential context for formulating your response.
 
-**Important Server Behavior Notes for You (LLM):**
--   **No Content-Length:** You MUST NOT calculate or include the `Content-Length` header in your responses. The server will handle appropriate framing for streaming the output (e.g., via `Connection: close` or chunked encoding).
--   **Connection Management:** Do NOT include the `Connection` header (e.g., `Connection: keep-alive`). The server will manage the connection and will close it after sending your response to signal the end of the stream.
--   **Date and Server Headers:** The actual server will add its own `Date` and `Server` headers. For your information, these headers will be similar to `Date: {{ dynamic_date_example }}` and `Server: {{ dynamic_server_name_example }}`. You MUST NOT include `Date` or `Server` headers in YOUR generated response block.
--   **Clean Output:** The response body should consist *only* of the content intended for the client (e.g., HTML, JSON, text). Do not include any extraneous metadata, annotations, internal thoughts.
+**Context Window Management:**
+- **Your Responsibility:** You are responsible for managing the conversation history to prevent it from exceeding the token limit.
+- **Context Window Status:** You are provided with `CURRENT_TOKEN_COUNT` (for the current session's history) and `CONTEXT_WINDOW_MAX`.
+- **Strategy:** When `CURRENT_TOKEN_COUNT` approaches `CONTEXT_WINDOW_MAX`, you must use tools to reduce the history size before generating the HTTP response. A good strategy is to fetch the history, create a summary, and then replace the old history with that summary using the available tools.
+- **Available Tools for History:**
+    - `get_conversation_history(session_id)`
+    - `update_session_history(session_id, new_history_json)`
 
-**Session Management:**
--   Your goal is to maintain a coherent session with each user.
--   **Session ID Injection:** The server will ALWAYS ensure a session ID is present. If the incoming request lacks an "X-Chat-Session-ID" cookie, the server generates one and you MUST include it in your response.
--   **Session Context:** You will receive dynamic session information in your system prompt:
-    -   `SESSION_ID`: The current session identifier
-    -   `IS_NEW_SESSION`: Boolean indicating if this is a new session (true) or continuing session (false)
-    -   `SESSION_HISTORY_COUNT`: Number of previous turns in this session
-    -   `GLOBAL_STATE`: A JSON string representing the current server-side global state.
--   **Cookie Handling Rules:**
-    -   **If IS_NEW_SESSION is true**: You MUST include a "Set-Cookie" header in your response:
-        `Set-Cookie: X-Chat-Session-ID={{ session_id }}; Path=/; HttpOnly; SameSite=Lax`
-    -   **If IS_NEW_SESSION is false**: Do NOT include any "Set-Cookie" header for the session ID (it's already established)
+**Important Server Behavior Notes:**
+-   **No Content-Length/Connection Headers:** Do NOT include `Content-Length` or `Connection` headers. The server handles these.
+-   **Date/Server Headers:** Do NOT include `Date` or `Server` headers. The server will add its own.
 
-**HTML Generation Requirement:**
--   You are responsible for generating the complete HTML document for each response, including `<!DOCTYPE html>`, `<html>`, `<head>` (with `<meta charset="UTF-8">` and `<meta name="viewport" content="width=device-width, initial-scale=1.0">`), and `<body>` tags.
-
-**Current Session Context:**
+**Current Request Context:**
 - SESSION_ID: {{ session_id }}
-- IS_NEW_SESSION: {{ is_new_session }}
-- SESSION_HISTORY_COUNT: {{ session_history_count }}
+- CURRENT_TOKEN_COUNT: {{ current_token_count }}
+- CONTEXT_WINDOW_MAX: {{ context_window_max }}
 - GLOBAL_STATE: {{ global_state }}
 """
 
@@ -302,41 +454,11 @@ for logger_instance in [app_logger, access_logger, conversation_logger]:
     logger_instance.propagate = False  # Prevent duplicate logs from root logger
 
 
-# --- Monkey-patching for MCP Tool Call Logging ---
-# This section dynamically adds logging to the agents library without modifying it directly.
-# We are replacing the original call_tool method with our own wrapper that adds logs.
-
-# 1. Keep a reference to the original method
-original_call_tool = _MCPServerWithClientSession.call_tool
-
-
-# 2. Define our new async function with logging
-async def _logged_call_tool(self, tool_name, arguments):
-    """A wrapper around the original call_tool that adds logging."""
-    app_logger.info(
-        f"MCP_TOOL_CALL: Server='{self.name}', Tool='{tool_name}', Args='{arguments}'"
-    )
-    try:
-        # Call the original method that we saved earlier
-        result = await original_call_tool(self, tool_name, arguments)
-        app_logger.info(
-            f"MCP_TOOL_SUCCESS: Server='{self.name}', Tool='{tool_name}', "
-            f"Result='{result}'"
-        )
-        return result
-    except Exception as e:
-        app_logger.error(
-            f"MCP_TOOL_ERROR: Server='{self.name}', Tool='{tool_name}', Error='{e}'"
-        )
-        raise
-
-
-# 3. Apply the patch
-_MCPServerWithClientSession.call_tool = _logged_call_tool
+# --- MCP Tool Call Logging ---
+# This section is handled by McpAgentClient. No monkey-patching needed.
 app_logger.info(
-    "Applied monkey-patch to _MCPServerWithClientSession.call_tool for enhanced logging."
+    "McpAgentClient handles tool call logging internally. No monkey-patching needed."
 )
-# --- End of Monkey-patching ---
 
 
 def _initialize_configuration_and_client():
@@ -350,6 +472,7 @@ def _initialize_configuration_and_client():
     DEFAULT_OPENAI_MODEL_NAME = "gpt-4o"
     DEFAULT_OPENAI_TEMPERATURE = 0.7
     DEFAULT_MAX_TURNS = 25
+    DEFAULT_CONTEXT_WINDOW_MAX = 0  # Disabled by default
 
     # Pre-parser to find --env-file without triggering help or errors for other args
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -430,6 +553,12 @@ def _initialize_configuration_and_client():
         help=f"Maximum number of turns for the agent (default: {DEFAULT_MAX_TURNS}, or from MAX_TURNS env var)",
     )
     parser.add_argument(
+        "--context-window-max",
+        type=int,
+        default=None,
+        help=f"Maximum token count for conversation history before summarizing. 0 to disable. (default: {DEFAULT_CONTEXT_WINDOW_MAX}, or from CONTEXT_WINDOW_MAX env var)",
+    )
+    parser.add_argument(
         "--web-app-file",
         type=str,
         default=get_env("WEB_APP_FILE"),
@@ -440,6 +569,13 @@ def _initialize_configuration_and_client():
         action="store_true",
         default=str(get_env("SAVE_CONVERSATIONS", "")).lower() in ("true", "1", "yes"),
         help="Save conversation history to files (can also be set with SAVE_CONVERSATIONS env var)",
+    )
+    parser.add_argument(
+        "--local-tools",
+        action=argparse.BooleanOptionalAction,
+        default=str(get_env("LOCAL_TOOLS_ENABLED", "true")).lower()
+        in ("true", "1", "yes"),
+        help="Enable or disable the in-process local tools server.",
     )
 
     # Now parse all arguments for real
@@ -459,6 +595,12 @@ def _initialize_configuration_and_client():
         if args.max_turns is not None
         else int(get_env("MAX_TURNS", DEFAULT_MAX_TURNS))
     )
+    config["CONTEXT_WINDOW_MAX"] = (
+        args.context_window_max
+        if args.context_window_max is not None
+        else int(get_env("CONTEXT_WINDOW_MAX", DEFAULT_CONTEXT_WINDOW_MAX))
+    )
+    config["LOCAL_TOOLS_ENABLED"] = args.local_tools
 
     if not config["API_KEY"]:
         app_logger.error(
@@ -541,8 +683,10 @@ def _initialize_configuration_and_client():
             f"Loaded {len(mcp_servers_data)} MCP server(s) from webapp file"
         )
     else:
-        config["MCP_SERVERS"] = None
-        app_logger.info("No MCP servers configured")
+        config["MCP_SERVERS"] = "[]"  # Start with an empty list string
+        app_logger.info("No MCP servers configured in webapp file")
+
+    app_logger.info(f"Local tools enabled: {config['LOCAL_TOOLS_ENABLED']}")
 
     # Store webapp metadata for later use
     config["WEBAPP_METADATA"] = webapp_yaml_data
@@ -624,128 +768,93 @@ def _parse_webapp_file(file_path):
 async def _initialize_mcp_servers_and_agent(config, app: web.Application):
     """
     Initialize MCP servers based on configuration and create an agent with them.
-    Returns the configured agent and run config.
+    Returns the configured agent.
     """
     mcp_servers = []
+    app["mcp_server_lifecycles"] = []
 
+    # Initialize external MCP servers from webapp config
     if config.get("MCP_SERVERS"):
         try:
             mcp_configs = json.loads(config["MCP_SERVERS"])
-            app_logger.info(f"Initializing {len(mcp_configs)} MCP server(s)")
+            app_logger.info(
+                f"Initializing {len(mcp_configs)} external MCP server(s) using agents.mcp"
+            )
 
             for mcp_config in mcp_configs:
                 server_type = mcp_config.get("type", "stdio").lower()
+                server = None
 
                 if server_type == "stdio":
-                    stdio_params = {
+                    params = {
                         "command": mcp_config["command"],
                         "args": mcp_config.get("args", []),
+                        "cwd": mcp_config.get("cwd"),
+                        "env": mcp_config.get("env"),
                     }
-                    if "cwd" in mcp_config:
-                        stdio_params["cwd"] = mcp_config["cwd"]
-                    if "env" in mcp_config:
-                        stdio_params["env"] = mcp_config["env"]
-
-                    server = MCPServerStdio(params=stdio_params, cache_tools_list=True)
+                    server = MCPServerStdio(params=params)
                 elif server_type == "sse":
-                    server = MCPServerSse(
-                        params={"url": mcp_config["url"]}, cache_tools_list=True
-                    )
+                    server = MCPServerSse(params={"url": mcp_config["url"]})
                 elif server_type == "streamable_http":
-                    server = MCPServerStreamableHttp(
-                        params={"url": mcp_config["url"]}, cache_tools_list=True
-                    )
+                    server = MCPServerStreamableHttp(params={"url": mcp_config["url"]})
                 else:
-                    app_logger.warning(
-                        f"Unknown MCP server type: {server_type}, skipping"
-                    )
+                    app_logger.error(f"Unsupported MCP server type: {server_type}")
                     continue
 
-                await server.connect()
+                await server.__aenter__()
+                app["mcp_server_lifecycles"].append(server)
                 tools = await server.list_tools()
 
                 if tools:
-                    app_logger.info(
-                        f"Added and connected to MCP server: {server_type} - {mcp_config}"
-                    )
+                    app_logger.info(f"Added and connected to MCP server: {server.name}")
                     tool_names = sorted([t.name for t in tools])
                     app_logger.info(f"  └─ Discovered tools: {tool_names}")
                     mcp_servers.append(server)
                 else:
                     app_logger.warning(
-                        f"MCP server {server_type} - {mcp_config} did not provide any tools and will be ignored."
+                        f"MCP server {server.name} did not provide any tools and will be ignored."
                     )
-                    # Disconnect if we are not going to use it
-                    await server.disconnect()
+                    await server.__aexit__(None, None, None)
+                    app["mcp_server_lifecycles"].pop()
 
         except json.JSONDecodeError as e:
             app_logger.error(f"Invalid JSON in MCP_SERVERS configuration: {e}")
         except Exception as e:
-            app_logger.exception(f"Error initializing MCP servers: {e}")
+            app_logger.exception(f"Error initializing external MCP servers: {e}")
 
-    # Define local tools for global state
-    global_state = app["global_state"]
+    # Spawn and connect to the local tools stdio server if enabled
+    if config.get("LOCAL_TOOLS_ENABLED"):
+        try:
+            app_logger.info("Spawning local tools stdio server as a subprocess.")
+            command_parts = [sys.executable, __file__, "--local-tools-stdio"]
+            params = {
+                "command": command_parts[0],
+                "args": command_parts[1:],
+            }
+            local_server_client = MCPServerStdio(params=params)
 
-    def set_global_state(key: str, value: str):
-        """
-        Stores a string value in a global, server-side dictionary. This state persists across all sessions and requests.
-        To store complex objects like booleans, numbers, or JSON, you must convert them to a string before calling this tool.
-        For example, to store that an initialization is done, you could set the key 'db_initialized' to the string 'true'.
+            await local_server_client.__aenter__()
+            app["mcp_server_lifecycles"].append(local_server_client)
+            tools = await local_server_client.list_tools()
 
-        :param key: The key under which to store the value.
-        :param value: The string value to store.
-        """
-        global_state[key] = value
-        app_logger.info(f"Global state set: {key} = {value}")
-        return f"Value for '{key}' has been set."
-
-    def get_global_state(key: str) -> str:
-        """
-        Retrieves a string value from the global, server-side dictionary.
-        If a value was stored, it will be returned as a string. If the key does not exist, it returns an empty string.
-
-        :param key: The key of the value to retrieve.
-        :return: The stored string value, or an empty string if the key does not exist.
-        """
-        value = global_state.get(key, "")
-        app_logger.info(f"Global state retrieved: {key} -> {value}")
-        return value
-
-    # Manually create FunctionTool objects
-    # This avoids the decorator issues with type hints.
-    from agents.function_schema import function_schema
-
-    set_state_schema = function_schema(set_global_state)
-    get_state_schema = function_schema(get_global_state)
-
-    async def _invoke_set_state(ctx, args_json):
-        args = json.loads(args_json)
-        return set_global_state(key=args["key"], value=args["value"])
-
-    async def _invoke_get_state(ctx, args_json):
-        args = json.loads(args_json)
-        return get_global_state(key=args["key"])
-
-    local_tools = [
-        FunctionTool(
-            name=set_state_schema.name,
-            description=set_state_schema.description,
-            params_json_schema=set_state_schema.params_json_schema,
-            on_invoke_tool=_invoke_set_state,
-        ),
-        FunctionTool(
-            name=get_state_schema.name,
-            description=get_state_schema.description,
-            params_json_schema=get_state_schema.params_json_schema,
-            on_invoke_tool=_invoke_get_state,
-        ),
-    ]
+            if tools:
+                app_logger.info(
+                    f"Successfully connected to local tools stdio server: {local_server_client.name}"
+                )
+                tool_names = sorted([t.name for t in tools])
+                app_logger.info(f"  └─ Discovered tools: {tool_names}")
+                mcp_servers.append(local_server_client)
+            else:
+                app_logger.warning(
+                    f"Local tools stdio server {local_server_client.name} did not provide any tools and will be ignored."
+                )
+                await local_server_client.__aexit__(None, None, None)
+                app["mcp_server_lifecycles"].pop()
+        except Exception:
+            app_logger.exception("Failed to spawn or connect to local tools server.")
 
     # Create model - either default or custom client
     if config.get("OPENAI_BASE_URL"):
-        # Use custom OpenAI client for providers like OpenRouter
-        # Following the official pattern from:
-        # https://github.com/openai/openai-agents-python/blob/main/examples/model_providers/custom_example_provider.py
         custom_client = AsyncOpenAI(
             api_key=config.get("API_KEY"),
             base_url=config.get("OPENAI_BASE_URL"),
@@ -753,20 +862,14 @@ async def _initialize_mcp_servers_and_agent(config, app: web.Application):
         model = OpenAIChatCompletionsModel(
             model=config["OPENAI_MODEL_NAME"], openai_client=custom_client
         )
-
-        # Disable tracing since we're not using platform.openai.com
-        # This prevents 401 errors when trying to upload traces
         set_tracing_disabled(disabled=True)
-
         app_logger.info(
             f"Using custom OpenAI client with base_url: {config.get('OPENAI_BASE_URL')}"
         )
         app_logger.info("Tracing disabled for custom provider")
     else:
-        # Use default model name for standard OpenAI
         model = config["OPENAI_MODEL_NAME"]
 
-    # Create agent with MCP servers
     agent = Agent(
         name="HTTP LLM Server Agent",
         instructions="You are an LLM powering an HTTP server. Use available tools to enhance your responses when appropriate.",
@@ -776,12 +879,10 @@ async def _initialize_mcp_servers_and_agent(config, app: web.Application):
             include_usage=True,
         ),
         mcp_servers=mcp_servers,
-        tools=local_tools,
     )
 
-    app_logger.info(
-        f"Agent initialized with {len(mcp_servers)} MCP server(s) and {len(local_tools)} local tool(s)"
-    )
+    app_logger.info(f"Agent initialized with {len(mcp_servers)} MCP server(s)")
+    app["agent"] = agent
     return agent
 
 
@@ -848,7 +949,6 @@ async def _send_llm_error_response_aiohttp(
             f"Attempting to generate a styled error page with LLM for status {status_code}..."
         )
 
-        # 1. Construct the prompt for the LLM
         template = jinja2.Template(ERROR_LLM_SYSTEM_PROMPT_TEMPLATE)
         error_system_prompt = template.render(
             status_code=status_code,
@@ -865,7 +965,6 @@ async def _send_llm_error_response_aiohttp(
             },
         ]
 
-        # 2. Call the LLM (not streamed, as error pages should be small)
         output_item = await Runner.run(agent, messages)
 
         if not isinstance(output_item, MessageOutputItem) or not output_item.content:
@@ -877,7 +976,6 @@ async def _send_llm_error_response_aiohttp(
         llm_response_text = output_item.content
         app_logger.info("Successfully received styled error page from LLM.")
 
-        # 3. Parse the raw HTTP response from the LLM
         separator = None
         if "\r\n\r\n" in llm_response_text:
             separator = "\r\n\r\n"
@@ -894,14 +992,12 @@ async def _send_llm_error_response_aiohttp(
 
         lines = header_section.split("\n")
         llm_headers = {}
-        # Status line is informational, we use the status_code passed to the function for reliability
         if lines:
             for line in lines[1:]:
                 if ":" in line:
                     key, value = line.split(":", 1)
                     llm_headers[key.strip()] = value.strip()
 
-        # 4. Create and return the aiohttp response
         return web.Response(
             text=body,
             status=status_code,
@@ -928,83 +1024,52 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         f"[{client_address_str}] Incoming request: {request.method} {request.path_qs}"
     )
 
-    current_session_store: AbstractSessionStore = request.app[
-        "session_store"
-    ]  # Get store from app context
-
+    current_session_store: AbstractSessionStore = request.app["session_store"]
     raw_request_text = await _get_raw_request_aiohttp(request)
-    server_generated_session_id_for_history = None  # For conversation_histories key
-    final_session_id_for_logging = (
-        None  # For access logs, could be server's or LLM's cookie value
-    )
-    new_session_id_generated_by_server = False
 
+    session_id_from_cookie = None
     cookie_header = request.headers.get("Cookie")
     if cookie_header:
         try:
             cookies = http.cookies.SimpleCookie()
             cookies.load(cookie_header)
             if "X-Chat-Session-ID" in cookies:
-                existing_session_id_from_cookie = cookies["X-Chat-Session-ID"].value
-                if existing_session_id_from_cookie:
-                    server_generated_session_id_for_history = (
-                        existing_session_id_from_cookie
-                    )
-                    final_session_id_for_logging = existing_session_id_from_cookie
+                session_id_from_cookie = cookies["X-Chat-Session-ID"].value
+                if session_id_from_cookie:
                     app_logger.info(
-                        f"[{client_address_str}] Existing session ID found in cookie: {final_session_id_for_logging}"
+                        f"[{client_address_str}] Existing session ID found in cookie: {session_id_from_cookie}"
                     )
         except Exception:
             app_logger.exception(
-                f"[{client_address_str}] Error parsing 'Cookie' header: '{cookie_header}'. Treating as no session ID."
-            )
-
-    if not server_generated_session_id_for_history:
-        new_uuid = str(uuid.uuid4())
-        server_generated_session_id_for_history = new_uuid
-        final_session_id_for_logging = (
-            new_uuid  # Initially server's, might be updated by LLM's cookie
-        )
-        new_session_id_generated_by_server = True
-        app_logger.info(
-            f"[{client_address_str}] No valid session ID in request. Server generated new session ID for history: {server_generated_session_id_for_history}"
-        )
-
-    history_messages = []
-    if server_generated_session_id_for_history:
-        history = await current_session_store.get_history(
-            server_generated_session_id_for_history
-        )  # Use new store
-        for turn in history:
-            history_messages.append(
-                {"role": turn["role"], "content": str(turn.get("content", ""))}
+                f"[{client_address_str}] Error parsing 'Cookie' header: '{cookie_header}'. Treating as no session."
             )
 
     system_prompt_template = request.app["system_prompt_template"]
     agent = request.app["agent"]
     global_state = request.app["global_state"]
     max_turns = request.app["max_turns"]
+    context_window_max = request.app["context_window_max"]
 
-    # Build dynamic system prompt with session context using Jinja2
-    session_history_count = len(history_messages)
+    current_token_count = 0
+    if session_id_from_cookie:
+        current_token_count = await current_session_store.get_token_count(
+            session_id_from_cookie
+        )
 
-    # Create the context for rendering the Jinja2 template
     jinja_context = {
-        "session_id": server_generated_session_id_for_history,
-        "is_new_session": str(new_session_id_generated_by_server).lower(),
-        "session_history_count": str(session_history_count),
+        "session_id": session_id_from_cookie or "",
         "global_state": json.dumps(global_state),
+        "current_token_count": str(current_token_count),
+        "context_window_max": str(context_window_max),
         "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),
-        "dynamic_server_name_example": "LLMWebServer/0.1",  # Matches constant used before
+        "dynamic_server_name_example": "LLMWebServer/0.1",
     }
 
-    # Render the final system prompt
     try:
         template = jinja2.Template(system_prompt_template)
         dynamic_system_prompt = template.render(jinja_context)
     except jinja2.exceptions.TemplateSyntaxError as e:
         app_logger.exception(f"Jinja2 template syntax error in the system prompt: {e}")
-        # Fallback or error response
         return await _send_llm_error_response_aiohttp(
             request,
             500,
@@ -1012,29 +1077,18 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "Invalid system prompt template.",
         )
 
-    # The conversation history now includes the system prompt
-    messages = [{"role": "system", "content": dynamic_system_prompt}]
-    messages.extend(history_messages)
-    messages.append({"role": "user", "content": raw_request_text})
-
-    # Debug logging to see what session context is being passed
-    app_logger.info(
-        f"[{client_address_str}] Session context: ID={server_generated_session_id_for_history}, "
-        f"IsNew={new_session_id_generated_by_server}, HistoryCount={session_history_count}"
-    )
-
-    # Debug: Show a snippet of the system prompt to verify session context injection
-    session_context_snippet = dynamic_system_prompt[
-        dynamic_system_prompt.find("**Current Session Context:**") :
+    messages = [
+        {"role": "system", "content": dynamic_system_prompt},
+        {"role": "user", "content": raw_request_text},
     ]
-    app_logger.debug(
-        f"[{client_address_str}] System prompt session context snippet: {session_context_snippet}"
+
+    app_logger.info(
+        f"[{client_address_str}] Handing request to LLM with session context: "
+        f"ID='{session_id_from_cookie or 'None'}', TokenCount={current_token_count}"
     )
 
-    # System prompt is now part of the message history, no need to set instructions
     agent.instructions = None
 
-    # --- LLM Interaction and Response Handling ---
     llm_call_start_time = None
     llm_first_token_time = None
     llm_stream_end_time = None
@@ -1044,16 +1098,12 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     prompt_tokens_from_usage = 0
     completion_tokens_from_usage = 0
 
-    response = None  # Define here for access in except/finally blocks
+    response = None
 
     try:
         llm_call_start_time = time.perf_counter()
         app_logger.info(f"[{client_address_str}] Processing LLM request...")
 
-        # The `messages` variable now holds the complete conversation history,
-        # including the current raw HTTP request as the final user message.
-        # The Agent's Runner expects this list as the input for multi-turn conversations.
-        # We use `run_streamed` to get a streaming response.
         agent_stream = Runner.run_streamed(
             agent,
             messages,
@@ -1062,8 +1112,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
         llm_first_token_time = time.perf_counter()
 
-        # Create a response object, but do NOT prepare it yet.
-        # We will parse headers from the LLM stream first.
         response = web.StreamResponse()
         response.enable_chunked_encoding(chunk_size=None)
 
@@ -1096,10 +1144,10 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 ]:
                     chunk = ""
                     item = event.item
-                    if hasattr(item, "chunk"):  # for message_chunk_created
+                    if hasattr(item, "chunk"):
                         if hasattr(item.chunk, "text"):
                             chunk = item.chunk.text
-                    elif hasattr(item, "raw_item"):  # for message_output_created
+                    elif hasattr(item, "raw_item"):
                         if isinstance(item.raw_item.content, list):
                             for part in item.raw_item.content:
                                 if hasattr(part, "text"):
@@ -1117,7 +1165,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                         await response.write(chunk.encode("utf-8"))
                         continue
 
-                    # Buffer until we have the full header
                     body_buffer += chunk
 
                     separator = None
@@ -1130,7 +1177,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                         header_section, body_part = body_buffer.split(separator, 1)
                         headers_and_status_parsed = True
 
-                        # Parse status line and headers
                         lines = header_section.split("\n")
                         llm_status_code = 200
                         llm_headers = {}
@@ -1150,7 +1196,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                                     key, value = line.split(":", 1)
                                     llm_headers[key.strip()] = value.strip()
 
-                        # Now that we have headers, prepare the response and send them
                         response.set_status(llm_status_code)
                         for k, v in llm_headers.items():
                             response.headers[k] = v
@@ -1159,7 +1204,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                             f"[{client_address_str}] Parsed HTTP headers from LLM, streaming response."
                         )
 
-                        # Write the first part of the body that was already in the buffer
                         if body_part:
                             await response.write(body_part.encode("utf-8"))
             else:
@@ -1169,8 +1213,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
         llm_stream_end_time = time.perf_counter()
 
-        # If the stream finishes and we haven't sent a response, it means the agent
-        # produced no valid HTTP response.
         if not response.prepared:
             app_logger.warning(
                 f"[{client_address_str}] LLM stream finished without a valid HTTP response header."
@@ -1195,7 +1237,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         model_error_indicator_for_recording = "UNEXPECTED_STREAM_PROCESSING_ERROR"
         llm_response_fully_collected_text_for_log = "ERROR_UNEXPECTED_STREAM_PROCESSING"
 
-        # If headers have not been sent, we can return a proper error response.
         if response and not response.prepared:
             return await _send_llm_error_response_aiohttp(
                 request,
@@ -1204,16 +1245,27 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 "Unexpected error during stream processing.",
             )
 
-        # Otherwise, the connection is likely broken. The client will see a broken stream.
         return response
     finally:
-        # Record conversation history (always in memory for session context, optionally to disk)
-        if server_generated_session_id_for_history:
+        final_session_id_for_turn = session_id_from_cookie
+        cookie_match = re.search(
+            r"Set-Cookie:\s*X-Chat-Session-ID=([^;]+)",
+            llm_response_fully_collected_text_for_log,
+            re.IGNORECASE,
+        )
+        if cookie_match:
+            new_id = cookie_match.group(1).strip()
+            if new_id != final_session_id_for_turn:
+                app_logger.info(
+                    f"New session ID '{new_id}' detected from LLM's Set-Cookie header. Adopting for logging."
+                )
+                final_session_id_for_turn = new_id
+
+        if final_session_id_for_turn:
             await current_session_store.record_turn(
-                server_generated_session_id_for_history, "user", raw_request_text
+                final_session_id_for_turn, "user", raw_request_text
             )
 
-            # Prepare assistant content for session history
             assistant_content_for_history = llm_response_fully_collected_text_for_log
             if model_error_indicator_for_recording:
                 assistant_content_for_history = f"[LLM_RESPONSE_STREAM_INTERRUPTED_OR_ERROR: {model_error_indicator_for_recording}]\n\n{llm_response_fully_collected_text_for_log}"
@@ -1221,16 +1273,20 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 assistant_content_for_history = "[LLM_EMPTY_RESPONSE_STREAMED]"
 
             await current_session_store.record_turn(
-                server_generated_session_id_for_history,
+                final_session_id_for_turn,
                 "assistant",
                 assistant_content_for_history,
             )
+            if prompt_tokens_from_usage > 0:
+                await current_session_store.update_token_count(
+                    final_session_id_for_turn, prompt_tokens_from_usage
+                )
         else:
             app_logger.error(
-                f"[{client_address_str}] server_generated_session_id_for_history was not set. Cannot record conversation turns."
+                f"[{client_address_str}] Could not determine session ID for saving conversation turn. "
+                "LLM may have failed to create a session or set a cookie."
             )
 
-        # Calculate timing and token metrics
         end_time = time.perf_counter()
         duration = end_time - start_time
         ttft_str = "N/A"
@@ -1250,7 +1306,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 llm_stream_duration_seconds_val = duration_llm_calc
                 duration_llm_stream_str = f"{llm_stream_duration_seconds_val:.3f}s"
 
-        # Calculate tokens per second
         compl_tokens_per_sec_str = "N/A"
         compl_tokens_per_sec_val = None
         if llm_stream_duration_seconds_val is not None:
@@ -1276,7 +1331,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             f"[{client_address_str}] Request handled. "
             f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, LLM_StreamDur: {duration_llm_stream_str}, "
             f"PToken: {prompt_tokens_from_usage}, CToken: {completion_tokens_from_usage}, CTPS: {compl_tokens_per_sec_str}, "
-            f"Sess: {server_generated_session_id_for_history}/{final_session_id_for_logging}, NewSrvSess: {new_session_id_generated_by_server}, "
+            f"Sess: {final_session_id_for_turn}, "
             f"FinishReason: {_last_chunk_finish_reason if _last_chunk_finish_reason else 'N/A'}."
         )
 
@@ -1295,9 +1350,10 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             if compl_tokens_per_sec_val is not None
             and compl_tokens_per_sec_val != float("inf")
             else compl_tokens_per_sec_val,
-            "session_hkey": server_generated_session_id_for_history,
-            "session_log_id": final_session_id_for_logging,
-            "new_session_by_server": new_session_id_generated_by_server,
+            "session_hkey": final_session_id_for_turn,
+            "session_log_id": final_session_id_for_turn,
+            "new_session_by_server": final_session_id_for_turn
+            != session_id_from_cookie,
             "http_method": request.method,
             "http_path_qs": request.path_qs,
             "llm_finish_reason": _last_chunk_finish_reason,
@@ -1323,11 +1379,11 @@ async def on_startup(app: web.Application):
         "MCP_SERVERS": app.get("webapp_mcp_servers"),
         "OPENAI_BASE_URL": app.get("openai_base_url"),
         "API_KEY": app.get("api_key"),
+        "LOCAL_TOOLS_ENABLED": app["local_tools_enabled"],
     }
 
     agent = await _initialize_mcp_servers_and_agent(config, app)
     app["agent"] = agent
-
     app_logger.info("Server startup actions completed.")
 
 
@@ -1336,32 +1392,22 @@ async def on_shutdown(app: web.Application):
     app_logger.info("\nServer shutting down (async)...")
 
     # Disconnect from MCP servers
-    agent = app.get("agent")
-    if agent and agent.mcp_servers:
-        app_logger.info(f"Disconnecting from {len(agent.mcp_servers)} MCP server(s)...")
-        for server in agent.mcp_servers:
+    if app.get("mcp_server_lifecycles"):
+        app_logger.info(
+            f"Disconnecting from {len(app['mcp_server_lifecycles'])} MCP server(s)..."
+        )
+        for server in app["mcp_server_lifecycles"]:
             try:
-                await server.cleanup()
+                await server.__aexit__(None, None, None)
                 app_logger.info(f"Disconnected from MCP server: {server.name}")
-            except RuntimeError as e:
-                # This can happen on forceful shutdown with Ctrl+C, it's a known issue
-                # with anyio's cancel scopes when not exited in the same task.
-                # We log it as a warning because the shutdown will likely continue anyway.
-                app_logger.warning(
-                    f"Ignoring cancel scope error during shutdown for {server.name}: {e}"
-                )
             except Exception as e:
                 app_logger.exception(
                     f"Error disconnecting from MCP server {server.name}: {e}"
                 )
 
     log_directory = "conversation_logs"
-    current_session_store: AbstractSessionStore = app[
-        "session_store"
-    ]  # Get store from app context
-    await current_session_store.save_all_sessions_on_shutdown(
-        log_directory
-    )  # Use new store (will handle conditional saving internally)
+    current_session_store: AbstractSessionStore = app["session_store"]
+    await current_session_store.save_all_sessions_on_shutdown(log_directory)
 
     app_logger.info("Server shutdown actions completed.")
 
@@ -1370,30 +1416,26 @@ def run_server():
     """Initializes configuration, sets up the aiohttp app, and starts the HTTP server."""
     config = _initialize_configuration_and_client()
 
-    # Initialize session store with configuration
     session_store = InMemorySessionStore(save_to_disk=config["SAVE_CONVERSATIONS"])
 
     app = web.Application()
     app["global_state"] = {}
-    # Store config and client in app context for handler access
     app["system_prompt_template"] = config["SYSTEM_PROMPT_TEMPLATE"]
     app["openai_model_name"] = config["OPENAI_MODEL_NAME"]
     app["openai_temperature"] = config["OPENAI_TEMPERATURE"]
     app["port"] = config["PORT"]
     app["save_conversations"] = config["SAVE_CONVERSATIONS"]
-    app["session_store"] = session_store  # Add session_store to app context
+    app["session_store"] = session_store
     app["api_key"] = config["API_KEY"]
     app["openai_base_url"] = config.get("OPENAI_BASE_URL")
     app["webapp_mcp_servers"] = config.get("MCP_SERVERS")
     app["max_turns"] = config["MAX_TURNS"]
     app["web_app_rules"] = config.get("WEB_APP_RULES", "")
+    app["context_window_max"] = config["CONTEXT_WINDOW_MAX"]
+    app["local_tools_enabled"] = config["LOCAL_TOOLS_ENABLED"]
 
-    app.router.add_route(
-        "*", "/{path:.*}", handle_http_request
-    )  # Catch all paths and methods
+    app.router.add_route("*", "/{path:.*}", handle_http_request)
 
-    # Ensure on_startup and on_shutdown are defined before being appended here
-    # These are typically defined at the module level or imported.
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
@@ -1404,7 +1446,8 @@ def run_server():
     app_logger.info(
         f"Configuration: API Key: {'Set' if config['API_KEY'] else 'NOT SET (REQUIRED!)'}, "
         f"Base URL: {config['OPENAI_BASE_URL'] or 'Default'}, Model: {config['OPENAI_MODEL_NAME']}, Temp: {config['OPENAI_TEMPERATURE']}, "
-        f"Max Turns: {config['MAX_TURNS']}, "
+        f"Max Turns: {config['MAX_TURNS']}, Context Window Max: {config['CONTEXT_WINDOW_MAX']}, "
+        f"Local Tools: {'Enabled' if config['LOCAL_TOOLS_ENABLED'] else 'Disabled'}, "
         f"Web App File: {config.get('WEB_APP_FILE') or 'Default (examples/default_info_site/prompt.md)'}, Save Conversations: {config['SAVE_CONVERSATIONS']}"
     )
     app_logger.info(
@@ -1413,11 +1456,31 @@ def run_server():
     app_logger.info(f"Access the server at http://localhost:{port_to_use}")
 
     web.run_app(app, host="0.0.0.0", port=port_to_use, access_log=access_logger)
-    # Note: web.run_app handles its own try/except for KeyboardInterrupt for graceful shutdown.
-    # The on_shutdown callback will be triggered.
+
+
+def run_local_tools_stdio_server():
+    """Entry point for running the local tools server as a stdio MCP server."""
+    # This server runs in its own process and has its own independent state.
+    app_logger.info("Starting local tools stdio server...")
+    # State is not saved to disk for the subprocess.
+    session_store = InMemorySessionStore(save_to_disk=False)
+    global_state = {}
+    tools_app = create_local_tools_stdio_server(global_state, session_store)
+
+    # The StdioServer's run() method is async and will run forever.
+    try:
+        tools_app.run(transport="stdio")
+    except KeyboardInterrupt:
+        app_logger.info("Local tools stdio server shut down by user.")
+    finally:
+        app_logger.info("Local tools stdio server has exited.")
 
 
 if __name__ == "__main__":
-    # http.cookies is used in LLMHTTPRequestHandler, so ensure it's imported.
-    # It's already imported globally.
-    run_server()
+    # This mechanism decides which server to run based on command-line arguments.
+    # The main web server can spawn this script with '--local-tools-stdio'
+    # to create the separate tools process.
+    if "--local-tools-stdio" in sys.argv:
+        run_local_tools_stdio_server()
+    else:
+        run_server()
