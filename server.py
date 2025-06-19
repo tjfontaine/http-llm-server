@@ -56,7 +56,7 @@ from agents.mcp import (
 )
 from agents.model_settings import ModelSettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
-from aiohttp import web
+from aiohttp import web, ClientSession
 from dotenv import dotenv_values
 from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
@@ -578,6 +578,17 @@ def _initialize_configuration_and_client():
         help="Enable or disable the in-process local tools server.",
     )
 
+    # One-shot mode for round-trip evaluation
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=False,
+        help=(
+            "Start the server, issue a single GET / request internally, print the raw HTTP response, "
+            "and then shut the server down. Useful for automated round-trip evaluation."
+        ),
+    )
+
     # Now parse all arguments for real
     args = parser.parse_args()
 
@@ -601,6 +612,9 @@ def _initialize_configuration_and_client():
         else int(get_env("CONTEXT_WINDOW_MAX", DEFAULT_CONTEXT_WINDOW_MAX))
     )
     config["LOCAL_TOOLS_ENABLED"] = args.local_tools
+
+    # Store one-shot flag
+    config["ONE_SHOT"] = args.one_shot
 
     if not config["API_KEY"]:
         app_logger.error(
@@ -1412,6 +1426,62 @@ async def on_shutdown(app: web.Application):
     app_logger.info("Server shutdown actions completed.")
 
 
+# --- One-Shot Helper --------------------------------------------------------
+
+
+async def _perform_one_shot(app: web.Application, host: str, port: int):
+    """Run the server long enough to perform a single internal GET / request.
+
+    This utility is intended for automated round-trip evaluation. It starts the
+    aiohttp server, makes a single HTTP request to the root path, prints the
+    complete raw HTTP response to stdout, and then shuts the server down
+    cleanly.
+    """
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=host, port=port)
+    await site.start()
+
+    # Brief pause to ensure the server is fully ready before sending the request
+    await asyncio.sleep(0.1)
+
+    # Determine the actual port in case 0 was specified (ephemeral port)
+    actual_port = port
+    try:
+        if actual_port == 0:
+            # Access the first socket bound by TCPSite
+            for _site in runner.sites:
+                if isinstance(_site, web.TCPSite) and _site._server and _site._server.sockets:
+                    actual_port = _site._server.sockets[0].getsockname()[1]
+                    break
+    except Exception:
+        # Fallback to provided port if introspection fails
+        pass
+
+    try:
+        async with ClientSession() as session:
+            async with session.get(f"http://{host}:{actual_port}/") as resp:
+                version = f"{resp.version.major}.{resp.version.minor}"
+                status_line = f"HTTP/{version} {resp.status} {resp.reason}"
+                header_lines = [f"{k}: {v}" for k, v in resp.headers.items()]
+                body = await resp.text()
+
+                raw_response = (
+                    status_line
+                    + "\r\n"
+                    + "\r\n".join(header_lines)
+                    + "\r\n\r\n"
+                    + body
+                )
+
+                # Log the raw HTTP response for evaluation tooling using the standard logger
+                app_logger.info("One-shot raw HTTP response:\n%s", raw_response)
+    finally:
+        # Gracefully shut the server down (runs on_shutdown hooks)
+        await runner.cleanup()
+
+
 def run_server():
     """Initializes configuration, sets up the aiohttp app, and starts the HTTP server."""
     config = _initialize_configuration_and_client()
@@ -1455,6 +1525,13 @@ def run_server():
     )
     app_logger.info(f"Access the server at http://localhost:{port_to_use}")
 
+    # One-shot evaluation mode
+    if config.get("ONE_SHOT"):
+        app_logger.info("Running in one-shot evaluation mode – the server will handle a single internal request and then exit.")
+        asyncio.run(_perform_one_shot(app, "127.0.0.1", port_to_use))
+        return
+
+    # Normal long-running server
     web.run_app(app, host="0.0.0.0", port=port_to_use, access_log=access_logger)
 
 
