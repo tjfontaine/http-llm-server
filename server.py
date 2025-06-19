@@ -330,37 +330,7 @@ class InMemorySessionStore(AbstractSessionStore):
 
 
 # --- Static Prompts and Global State ---
-LLM_HTTP_SERVER_PROMPT_BASE = """You are an LLM powering an HTTP server. Your primary function is to generate complete and valid HTTP responses.
-
-**Core Task:**
-Each time you are invoked, you will receive the raw text of an incoming HTTP request. You MUST respond with the complete, raw text of an HTTP response, starting directly with the HTTP status line (e.g., "HTTP/1.1 200 OK").
-
-**Session and History Management:**
-- **Your Responsibility:** You are entirely responsible for managing the user session. You will be given a Session ID if one exists from a user's cookie. If the Session ID is missing or empty, you MUST create a new one.
-- **Workflow for New Sessions:** If the provided `SESSION_ID` in the context below is empty, you MUST perform these steps *before* generating the main HTTP response:
-    1. Call the `create_session()` tool to generate a new session ID.
-    2. Use this new ID for all subsequent tool calls in this turn (e.g., `get_conversation_history`).
-    3. Your final HTTP response for this request MUST include a `Set-Cookie` header to give the new ID to the user. Example: `Set-Cookie: X-Chat-Session-ID=the-new-id-you-generated; Path=/; HttpOnly; SameSite=Lax`
-- **Workflow for Existing Sessions:** If a `SESSION_ID` is provided, you MUST use it to retrieve the conversation history by calling the `get_conversation_history(session_id)` tool. This history is essential context for formulating your response.
-
-**Context Window Management:**
-- **Your Responsibility:** You are responsible for managing the conversation history to prevent it from exceeding the token limit.
-- **Context Window Status:** You are provided with `CURRENT_TOKEN_COUNT` (for the current session's history) and `CONTEXT_WINDOW_MAX`.
-- **Strategy:** When `CURRENT_TOKEN_COUNT` approaches `CONTEXT_WINDOW_MAX`, you must use tools to reduce the history size before generating the HTTP response. A good strategy is to fetch the history, create a summary, and then replace the old history with that summary using the available tools.
-- **Available Tools for History:**
-    - `get_conversation_history(session_id)`
-    - `update_session_history(session_id, new_history_json)`
-
-**Important Server Behavior Notes:**
--   **No Content-Length/Connection Headers:** Do NOT include `Content-Length` or `Connection` headers. The server handles these.
--   **Date/Server Headers:** Do NOT include `Date` or `Server` headers. The server will add its own.
-
-**Current Request Context:**
-- SESSION_ID: {{ session_id }}
-- CURRENT_TOKEN_COUNT: {{ current_token_count }}
-- CONTEXT_WINDOW_MAX: {{ context_window_max }}
-- GLOBAL_STATE: {{ global_state }}
-"""
+LLM_HTTP_SERVER_PROMPT_BASE = ""  # This will be loaded from a file
 
 
 ERROR_PAGE_TEMPLATE_STR = """<!DOCTYPE html>
@@ -383,24 +353,7 @@ ERROR_PAGE_TEMPLATE_STR = """<!DOCTYPE html>
 ERROR_PAGE_TEMPLATE = jinja2.Template(ERROR_PAGE_TEMPLATE_STR)
 
 
-ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert web developer generating a user-friendly and stylish error page.
-Your response MUST be a complete and valid HTTP response, starting directly with the status line (e.g., "HTTP/1.1 500 Internal Server Error").
-Do NOT use markdown fences or any other formatting around the raw HTTP response.
-The server will handle `Content-Length`, `Connection`, `Date`, and `Server` headers. Do not include them.
-
-**Error Information to Display:**
-- HTTP Status Code: {{ status_code }}
-- Main Error Message: {{ message }}
-- Technical Details (display this in a subtle way, perhaps in a collapsible section or a small font, if appropriate for the style): {{ error_details }}
-
-**Style and Tone Guidelines:**
-The error page's design, layout, and language should seamlessly match the web application described below.
-Adhere to its visual identity to ensure a consistent user experience even during errors.
-
-<web_application_rules>
-{{ web_app_rules }}
-</web_application_rules>
-"""
+ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = ""  # This will be loaded from a file
 
 
 # --- In-memory Conversation History Storage (for logging and potential rehydration) ---
@@ -620,6 +573,30 @@ def _initialize_configuration_and_client():
         app_logger.error(
             "OpenAI API Key not provided. Please set OPENAI_API_KEY environment variable or use --api-key."
         )
+        exit(1)
+
+    global LLM_HTTP_SERVER_PROMPT_BASE
+    try:
+        with open("src/prompts/system.md", "r", encoding="utf-8") as f:
+            LLM_HTTP_SERVER_PROMPT_BASE = f.read()
+        app_logger.info("Loaded system prompt from src/prompts/system.md")
+    except FileNotFoundError:
+        app_logger.error("System prompt file not found at src/prompts/system.md. Exiting.")
+        exit(1)
+    except Exception as e:
+        app_logger.exception(f"Error reading system prompt file: {e}")
+        exit(1)
+
+    global ERROR_LLM_SYSTEM_PROMPT_TEMPLATE
+    try:
+        with open("src/prompts/error.md", "r", encoding="utf-8") as f:
+            ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = f.read()
+        app_logger.info("Loaded error prompt from src/prompts/error.md")
+    except FileNotFoundError:
+        app_logger.error("Error prompt file not found at src/prompts/error.md. Exiting.")
+        exit(1)
+    except Exception as e:
+        app_logger.exception(f"Error reading error prompt file: {e}")
         exit(1)
 
     WEB_APP_PROMPT_CONTENT_FROM_FILE = ""
