@@ -79,11 +79,9 @@ class InMemorySessionStore(AbstractSessionStore):
         self._token_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._save_to_disk = save_to_disk
-        # Get the logger used elsewhere in the module for consistency
-        self._logger = logging.getLogger("llm_http_server_app")  # Using app_logger
-        self._conversation_logger = logging.getLogger(
-            "conversation_history"
-        )  # Using conversation_logger
+        # Get loggers for consistent logging throughout the application
+        self._logger = logging.getLogger("llm_http_server_app")
+        self._conversation_logger = logging.getLogger("conversation_history")
 
     async def get_history(self, session_id: str) -> list[dict]:
         """Retrieve the conversation history for a given session ID."""
@@ -105,7 +103,7 @@ class InMemorySessionStore(AbstractSessionStore):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             history.append(entry)
-            self._conversation_logger.info(  # Changed to use self._conversation_logger
+            self._conversation_logger.info(
                 f"Recorded '{role}' turn for session_id '{session_id}' via InMemorySessionStore. Total turns: {len(history)}"
             )
 
@@ -165,7 +163,7 @@ class InMemorySessionStore(AbstractSessionStore):
                         continue
                     file_path = os.path.join(log_directory, f"{session_id}.json")
                     try:
-                        # Using standard open for simplicity, can be aiofiles if becomes bottleneck
+                        # Using standard open for simplicity; can be replaced with aiofiles if it becomes a bottleneck.
                         with open(file_path, "w") as f:
                             json.dump(history_list, f, indent=2)
                         self._logger.info(
@@ -198,10 +196,6 @@ LLM_HTTP_SERVER_PROMPT_BASE = ""  # This will be loaded from a file
 # ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = ""
 
 
-# --- In-memory Conversation History Storage (for logging and potential rehydration) ---
-# Key: session_id, Value: list of conversation turns (OpenAI format: {"role": "user/assistant", "content": "..."})
-
-
 # --- Logging Configuration (Global for simplicity, initialized early) ---
 # Custom formatter for JSON logs
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
@@ -213,9 +207,9 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
             )
         if log_record.get("levelname"):
             log_record["severity"] = log_record["levelname"].upper()
-            del log_record["levelname"]  # Remove original levelname
+            del log_record["levelname"]
         else:
-            log_record["severity"] = "INFO"  # Default severity
+            log_record["severity"] = "INFO"
         if not log_record.get("logger"):
             log_record["logger"] = record.name
 
@@ -233,13 +227,13 @@ json_formatter = CustomJsonFormatter(
 )
 
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(json_formatter)  # Apply JSON formatter
+console_handler.setFormatter(json_formatter)
 
-# Clear existing handlers and add the new JSON one
+# Clear existing handlers and add the new one
 for logger_instance in [app_logger, access_logger, conversation_logger]:
     if logger_instance.hasHandlers():
         logger_instance.handlers.clear()
-    # Replace StreamHandler with RichHandler for colorful output
+    # Replace StreamHandler with RichHandler for colorful, readable output
     rich_handler = RichHandler(
         rich_tracebacks=True, show_path=False
     )  # show_path=False to keep logs cleaner
@@ -248,7 +242,7 @@ for logger_instance in [app_logger, access_logger, conversation_logger]:
 
 
 # --- MCP Tool Call Logging ---
-# This section is handled by McpAgentClient. No monkey-patching needed.
+# McpAgentClient handles tool call logging internally, so no monkey-patching is needed.
 app_logger.info(
     "McpAgentClient handles tool call logging internally. No monkey-patching needed."
 )
@@ -263,25 +257,19 @@ def _parse_webapp_file(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Check if the file starts with YAML front matter
         if content.startswith("---\n"):
-            # Find the end of the YAML front matter
             match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
             if match:
                 yaml_content = match.group(1)
                 markdown_content = match.group(2)
-
-                # Parse the YAML
                 yaml_data = yaml.safe_load(yaml_content) if yaml_content.strip() else {}
-
                 return yaml_data, markdown_content.strip()
-            else:
-                # Invalid front matter format
-                app_logger.warning(f"Invalid YAML front matter format in {file_path}")
-                return {}, content
-        else:
-            # No front matter, treat as plain markdown/text
+
+            app_logger.warning(f"Invalid YAML front matter format in {file_path}")
             return {}, content
+
+        # No front matter, treat as plain markdown/text
+        return {}, content
 
     except yaml.YAMLError as e:
         app_logger.error(f"YAML parsing error in {file_path}: {e}")
@@ -377,7 +365,7 @@ async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application
         except Exception:
             app_logger.exception("Failed to spawn or connect to local tools server.")
 
-    # Create model - either default or custom client
+    # Create model, using a custom client if a base_url is provided
     if config.openai_base_url:
         custom_client = AsyncOpenAI(
             api_key=config.api_key, base_url=config.openai_base_url
@@ -440,7 +428,8 @@ async def _send_llm_error_response_aiohttp(
 ) -> web.Response:
     """
     Sends an error response generated by an LLM.
-    If the LLM fails, it sends a minimal plain text response.
+
+    If the LLM fails, it sends a minimal plain text response as a fallback.
     """
     ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = request.app["error_llm_system_prompt_template"]
 
@@ -623,7 +612,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     completion_tokens_from_usage = 0
 
     response = None
-    # Use a local variable for session state
+    # Use a local variable for session state to handle cases where the session ID is assigned mid-stream.
     final_session_id_for_turn = session_id_from_cookie
 
     try:
@@ -644,6 +633,10 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         headers_and_status_parsed = False
         body_buffer = ""
 
+        # The core of this server: stream the agent's response.
+        # This loop processes events from the agent, including tool calls and content chunks.
+        # A key design element is that the LLM is expected to generate a raw HTTP response,
+        # which this server parses on-the-fly to construct a valid `aiohttp.web.Response`.
         async for event in agent_stream.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
                 raw_chunk = event.data
@@ -718,6 +711,9 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
                     body_buffer += chunk
 
+                    # The LLM is expected to stream a full HTTP response, headers and body.
+                    # We buffer the initial part of the stream until we find the double newline
+                    # that separates headers from the body.
                     separator = None
                     if "\r\n\r\n" in body_buffer:
                         separator = "\r\n\r\n"
@@ -798,6 +794,9 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
         return response
     finally:
+        # This block ensures that critical post-request actions are always performed,
+        # such as recording the conversation turn and logging detailed performance metrics.
+        # This is vital for debugging, monitoring, and maintaining session state.
         if final_session_id_for_turn:
             await current_session_store.record_turn(
                 final_session_id_for_turn, "user", raw_request_text
@@ -970,7 +969,7 @@ def run_local_tools_stdio_server():
     global_state = {}
     tools_app = create_local_tools_stdio_server(global_state, session_store)
 
-    # The StdioServer's run() method is async and will run forever.
+    # The StdioServer's run() method is async and will run until the process is terminated.
     try:
         tools_app.run(transport="stdio")
     except KeyboardInterrupt:
