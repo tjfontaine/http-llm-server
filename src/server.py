@@ -563,8 +563,15 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     max_turns = config.max_turns
     context_window_max = config.context_window_max
 
+    history = []
     current_token_count = 0
     if session_id_from_cookie:
+        full_history = await current_session_store.get_history(session_id_from_cookie)
+        # Strip extra keys from history that the LLM API might reject
+        history = [
+            {"role": turn["role"], "content": turn["content"]}
+            for turn in full_history
+        ]
         current_token_count = await current_session_store.get_token_count(
             session_id_from_cookie
         )
@@ -590,14 +597,14 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "Invalid system prompt template.",
         )
 
-    messages = [
-        {"role": "system", "content": dynamic_system_prompt},
-        {"role": "user", "content": raw_request_text},
-    ]
+    messages = [{"role": "system", "content": dynamic_system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": raw_request_text})
 
     app_logger.info(
         f"[{client_address_str}] Handing request to LLM with session context: "
-        f"ID='{session_id_from_cookie or 'None'}', TokenCount={current_token_count}"
+        f"ID='{session_id_from_cookie or 'None'}', "
+        f"HistoryTurns={len(history)}, TokenCount={current_token_count}"
     )
 
     agent.instructions = None
