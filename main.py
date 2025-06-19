@@ -14,6 +14,7 @@ from src.server import (
     _parse_webapp_file,
     DEFAULT_WEB_APP_FILE,
 )
+from src.config import Config
 
 
 def initialize_configuration():
@@ -333,7 +334,27 @@ def initialize_configuration():
         else float(get_env("OPENAI_TEMPERATURE", DEFAULT_OPENAI_TEMPERATURE))
     )
 
-    return config
+    # Convert to Pydantic Config
+    pydantic_cfg = Config(
+        port=config["PORT"],
+        api_key=config["API_KEY"],
+        openai_base_url=config["OPENAI_BASE_URL"],
+        openai_model_name=config["OPENAI_MODEL_NAME"],
+        openai_temperature=config["OPENAI_TEMPERATURE"],
+        max_turns=config["MAX_TURNS"],
+        context_window_max=config["CONTEXT_WINDOW_MAX"],
+        web_app_file=config["WEB_APP_FILE"],
+        save_conversations=config["SAVE_CONVERSATIONS"],
+        local_tools_enabled=config["LOCAL_TOOLS_ENABLED"],
+        one_shot=config["ONE_SHOT"],
+        local_tools_stdio=config["LOCAL_TOOLS_STDIO"],
+        mcp_servers=config["MCP_SERVERS"],
+        webapp_metadata=config["WEBAPP_METADATA"],
+        system_prompt_template=config["SYSTEM_PROMPT_TEMPLATE"],
+        error_llm_system_prompt_template=config["ERROR_LLM_SYSTEM_PROMPT_TEMPLATE"],
+        web_app_rules=config["WEB_APP_RULES"],
+    )
+    return pydantic_cfg
 
 
 async def _perform_one_shot(app: web.Application, host: str, port: int):
@@ -396,16 +417,20 @@ def run_server():
     app_logger, access_logger, _ = get_loggers()
     app = create_app(config)
 
-    port_to_use = config["PORT"]
+    port_to_use = config.port
     app_logger.info(
         f"LLM HTTP Server (Async using aiohttp) starting on port {port_to_use}"
     )
     app_logger.info(
-        f"Configuration: API Key: {'Set' if config['API_KEY'] else 'NOT SET (REQUIRED!)'}, "
-        f"Base URL: {config['OPENAI_BASE_URL'] or 'Default'}, Model: {config['OPENAI_MODEL_NAME']}, Temp: {config['OPENAI_TEMPERATURE']}, "
-        f"Max Turns: {config['MAX_TURNS']}, Context Window Max: {config['CONTEXT_WINDOW_MAX']}, "
-        f"Local Tools: {'Enabled' if config['LOCAL_TOOLS_ENABLED'] else 'Disabled'}, "
-        f"Web App File: {config.get('WEB_APP_FILE') or 'Default (examples/default_info_site/prompt.md)'}, Save Conversations: {config['SAVE_CONVERSATIONS']}"
+        f"Configuration: API Key: {'Set' if config.api_key else 'NOT SET'}, "
+        f"Base URL: {config.openai_base_url or 'Default'}, "
+        f"Model: {config.openai_model_name}, "
+        f"Temp: {config.openai_temperature}, "
+        f"Max Turns: {config.max_turns}, "
+        f"Context Window Max: {config.context_window_max}, "
+        f"Local Tools: {'Enabled' if config.local_tools_enabled else 'Disabled'}, "
+        f"Web App File: {config.web_app_file or DEFAULT_WEB_APP_FILE}, "
+        f"Save Conversations: {config.save_conversations}"
     )
     app_logger.info(
         f"To override, use command-line arguments (e.g., --port {port_to_use}) or environment variables."
@@ -413,7 +438,7 @@ def run_server():
     app_logger.info(f"Access the server at http://localhost:{port_to_use}")
 
     # One-shot evaluation mode
-    if config.get("ONE_SHOT"):
+    if config.one_shot:
         app_logger.info(
             "Running in one-shot evaluation mode – the server will handle a single internal request and then exit."
         )

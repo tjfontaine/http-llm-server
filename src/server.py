@@ -54,6 +54,7 @@ from pythonjsonlogger import jsonlogger
 from rich.logging import RichHandler
 
 from .local_tools import AbstractSessionStore, create_local_tools_stdio_server
+from src.config import Config
 
 # Default web app file path
 DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
@@ -308,7 +309,7 @@ def _parse_webapp_file(file_path):
         return {}, ""
 
 
-async def _initialize_mcp_servers_and_agent(config, app: web.Application):
+async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application):
     """
     Initialize MCP servers based on configuration and create an agent with them.
     Returns the configured agent.
@@ -316,57 +317,49 @@ async def _initialize_mcp_servers_and_agent(config, app: web.Application):
     mcp_servers = []
     app["mcp_server_lifecycles"] = []
 
-    # Initialize external MCP servers from webapp config
-    if config.get("MCP_SERVERS"):
-        try:
-            mcp_configs = json.loads(config["MCP_SERVERS"])
-            app_logger.info(
-                f"Initializing {len(mcp_configs)} external MCP server(s) using agents.mcp"
-            )
+    # Initialize external MCP servers from typed config
+    if config.mcp_servers:
+        app_logger.info(f"Initializing {len(config.mcp_servers)} external MCP server(s) using agents.mcp")
 
-            for mcp_config in mcp_configs:
-                server_type = mcp_config.get("type", "stdio").lower()
-                server = None
+        for mcp_cfg in config.mcp_servers:
+            server_type = mcp_cfg.type.lower()
+            server = None
 
-                if server_type == "stdio":
-                    params = {
-                        "command": mcp_config["command"],
-                        "args": mcp_config.get("args", []),
-                        "cwd": mcp_config.get("cwd"),
-                        "env": mcp_config.get("env"),
-                    }
-                    server = MCPServerStdio(params=params)
-                elif server_type == "sse":
-                    server = MCPServerSse(params={"url": mcp_config["url"]})
-                elif server_type == "streamable_http":
-                    server = MCPServerStreamableHttp(params={"url": mcp_config["url"]})
-                else:
-                    app_logger.error(f"Unsupported MCP server type: {server_type}")
-                    continue
+            if server_type == "stdio":
+                params = {
+                    "command": mcp_cfg.command,
+                    "args": mcp_cfg.args or [],
+                    "cwd": mcp_cfg.cwd,
+                    "env": mcp_cfg.env,
+                }
+                server = MCPServerStdio(params=params)
+            elif server_type == "sse":
+                server = MCPServerSse(params={"url": mcp_cfg.url})
+            elif server_type == "streamable_http":
+                server = MCPServerStreamableHttp(params={"url": mcp_cfg.url})
+            else:
+                app_logger.error(f"Unsupported MCP server type: {server_type}")
+                continue
 
+            try:
                 await server.__aenter__()
                 app["mcp_server_lifecycles"].append(server)
                 tools = await server.list_tools()
 
                 if tools:
                     app_logger.info(f"Added and connected to MCP server: {server.name}")
-                    tool_names = sorted([t.name for t in tools])
+                    tool_names = sorted(t.name for t in tools)
                     app_logger.info(f"  └─ Discovered tools: {tool_names}")
                     mcp_servers.append(server)
                 else:
-                    app_logger.warning(
-                        f"MCP server {server.name} did not provide any tools and will be ignored."
-                    )
+                    app_logger.warning(f"MCP server {server.name} did not provide any tools and will be ignored.")
                     await server.__aexit__(None, None, None)
                     app["mcp_server_lifecycles"].pop()
-
-        except json.JSONDecodeError as e:
-            app_logger.error(f"Invalid JSON in MCP_SERVERS configuration: {e}")
-        except Exception as e:
-            app_logger.exception(f"Error initializing external MCP servers: {e}")
+            except Exception as e:
+                app_logger.exception(f"Error initializing MCP server {server_type}: {e}")
 
     # Spawn and connect to the local tools stdio server if enabled
-    if config.get("LOCAL_TOOLS_ENABLED"):
+    if config.local_tools_enabled:
         try:
             app_logger.info("Spawning local tools stdio server as a subprocess.")
             command_parts = [sys.executable, "main.py", "--local-tools-stdio"]
@@ -397,28 +390,21 @@ async def _initialize_mcp_servers_and_agent(config, app: web.Application):
             app_logger.exception("Failed to spawn or connect to local tools server.")
 
     # Create model - either default or custom client
-    if config.get("OPENAI_BASE_URL"):
-        custom_client = AsyncOpenAI(
-            api_key=config.get("API_KEY"),
-            base_url=config.get("OPENAI_BASE_URL"),
-        )
-        model = OpenAIChatCompletionsModel(
-            model=config["OPENAI_MODEL_NAME"], openai_client=custom_client
-        )
+    if config.openai_base_url:
+        custom_client = AsyncOpenAI(api_key=config.api_key, base_url=config.openai_base_url)
+        model = OpenAIChatCompletionsModel(model=config.openai_model_name, openai_client=custom_client)
         set_tracing_disabled(disabled=True)
-        app_logger.info(
-            f"Using custom OpenAI client with base_url: {config.get('OPENAI_BASE_URL')}"
-        )
+        app_logger.info(f"Using custom OpenAI client with base_url: {config.openai_base_url}")
         app_logger.info("Tracing disabled for custom provider")
     else:
-        model = config["OPENAI_MODEL_NAME"]
+        model = config.openai_model_name
 
     agent = Agent(
         name="HTTP LLM Server Agent",
         instructions="You are an LLM powering an HTTP server. Use available tools to enhance your responses when appropriate.",
         model=model,
         model_settings=ModelSettings(
-            temperature=config["OPENAI_TEMPERATURE"],
+            temperature=config.openai_temperature,
             include_usage=True,
         ),
         mcp_servers=mcp_servers,
@@ -588,11 +574,13 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 f"[{client_address_str}] Error parsing 'Cookie' header: '{cookie_header}'. Treating as no session."
             )
 
-    system_prompt_template = request.app["system_prompt_template"]
+    # Load typed config
+    config = request.app["config"]
+    system_prompt_template = config.system_prompt_template
     agent = request.app["agent"]
     global_state = request.app["global_state"]
-    max_turns = request.app["max_turns"]
-    context_window_max = request.app["context_window_max"]
+    max_turns = config.max_turns
+    context_window_max = config.context_window_max
 
     current_token_count = 0
     if session_id_from_cookie:
@@ -917,14 +905,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 async def on_startup(app: web.Application):
     """Async operations to perform on server startup."""
     # Initialize MCP servers and agent
-    config = {
-        "OPENAI_MODEL_NAME": app["openai_model_name"],
-        "OPENAI_TEMPERATURE": app["openai_temperature"],
-        "MCP_SERVERS": app.get("webapp_mcp_servers"),
-        "OPENAI_BASE_URL": app.get("openai_base_url"),
-        "API_KEY": app.get("api_key"),
-        "LOCAL_TOOLS_ENABLED": app["local_tools_enabled"],
-    }
+    config = app["config"]
 
     agent = await _initialize_mcp_servers_and_agent(config, app)
     app["agent"] = agent
@@ -956,26 +937,15 @@ async def on_shutdown(app: web.Application):
     app_logger.info("Server shutdown actions completed.")
 
 
-def create_app(config: dict) -> web.Application:
+def create_app(config: Config) -> web.Application:
     """Initializes and returns the aiohttp application."""
-    session_store = InMemorySessionStore(save_to_disk=config["SAVE_CONVERSATIONS"])
+    # Typed config from Pydantic
+    session_store = InMemorySessionStore(save_to_disk=config.save_conversations)
 
     app = web.Application()
     app["global_state"] = {}
-    app["system_prompt_template"] = config["SYSTEM_PROMPT_TEMPLATE"]
-    app["openai_model_name"] = config["OPENAI_MODEL_NAME"]
-    app["openai_temperature"] = config["OPENAI_TEMPERATURE"]
-    app["port"] = config["PORT"]
-    app["save_conversations"] = config["SAVE_CONVERSATIONS"]
+    app["config"] = config
     app["session_store"] = session_store
-    app["api_key"] = config["API_KEY"]
-    app["openai_base_url"] = config.get("OPENAI_BASE_URL")
-    app["webapp_mcp_servers"] = config.get("MCP_SERVERS")
-    app["max_turns"] = config["MAX_TURNS"]
-    app["web_app_rules"] = config.get("WEB_APP_RULES", "")
-    app["context_window_max"] = config["CONTEXT_WINDOW_MAX"]
-    app["local_tools_enabled"] = config["LOCAL_TOOLS_ENABLED"]
-    app["error_llm_system_prompt_template"] = config["ERROR_LLM_SYSTEM_PROMPT_TEMPLATE"]
 
     app.router.add_route("*", "/{path:.*}", handle_http_request)
 
