@@ -86,6 +86,20 @@ async def create_session(context: Context) -> CallToolResult:
 
 
 @local_mcp_server.tool()
+async def assign_session_id(context: Context, session_id: str) -> CallToolResult:
+    """
+    Assigns or confirms the session ID for the current request.
+    This tool should be called by the LLM to signal which session it is operating on,
+    especially when creating a new session. The ID is then used by the server
+    to correctly associate conversation history.
+    """
+    logging.info(f"Local tool assign_session_id called with: {session_id}")
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Session ID assigned: {session_id}")]
+    )
+
+
+@local_mcp_server.tool()
 async def set_global_state(context: Context, key: str, value: str) -> CallToolResult:
     """
     Stores a string value in a global, server-side dictionary.

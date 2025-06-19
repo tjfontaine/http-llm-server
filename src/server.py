@@ -41,7 +41,7 @@ from agents import (
     Runner,
     set_tracing_disabled,
 )
-from agents.items import MessageOutputItem
+from agents.items import MessageOutputItem, ToolCallItem
 from agents.mcp import (
     MCPServerSse,
     MCPServerStdio,
@@ -50,11 +50,13 @@ from agents.mcp import (
 from agents.model_settings import ModelSettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
+from openai.types.responses import ResponseFunctionToolCall
 from pythonjsonlogger import jsonlogger
 from rich.logging import RichHandler
 
 from .local_tools import AbstractSessionStore, create_local_tools_stdio_server
 from src.config import Config
+
 
 # Default web app file path
 DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
@@ -319,7 +321,9 @@ async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application
 
     # Initialize external MCP servers from typed config
     if config.mcp_servers:
-        app_logger.info(f"Initializing {len(config.mcp_servers)} external MCP server(s) using agents.mcp")
+        app_logger.info(
+            f"Initializing {len(config.mcp_servers)} external MCP server(s) using agents.mcp"
+        )
 
         for mcp_cfg in config.mcp_servers:
             server_type = mcp_cfg.type.lower()
@@ -352,11 +356,15 @@ async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application
                     app_logger.info(f"  └─ Discovered tools: {tool_names}")
                     mcp_servers.append(server)
                 else:
-                    app_logger.warning(f"MCP server {server.name} did not provide any tools and will be ignored.")
+                    app_logger.warning(
+                        f"MCP server {server.name} did not provide any tools and will be ignored."
+                    )
                     await server.__aexit__(None, None, None)
                     app["mcp_server_lifecycles"].pop()
             except Exception as e:
-                app_logger.exception(f"Error initializing MCP server {server_type}: {e}")
+                app_logger.exception(
+                    f"Error initializing MCP server {server_type}: {e}"
+                )
 
     # Spawn and connect to the local tools stdio server if enabled
     if config.local_tools_enabled:
@@ -391,10 +399,16 @@ async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application
 
     # Create model - either default or custom client
     if config.openai_base_url:
-        custom_client = AsyncOpenAI(api_key=config.api_key, base_url=config.openai_base_url)
-        model = OpenAIChatCompletionsModel(model=config.openai_model_name, openai_client=custom_client)
+        custom_client = AsyncOpenAI(
+            api_key=config.api_key, base_url=config.openai_base_url
+        )
+        model = OpenAIChatCompletionsModel(
+            model=config.openai_model_name, openai_client=custom_client
+        )
         set_tracing_disabled(disabled=True)
-        app_logger.info(f"Using custom OpenAI client with base_url: {config.openai_base_url}")
+        app_logger.info(
+            f"Using custom OpenAI client with base_url: {config.openai_base_url}"
+        )
         app_logger.info("Tracing disabled for custom provider")
     else:
         model = config.openai_model_name
@@ -631,6 +645,8 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     completion_tokens_from_usage = 0
 
     response = None
+    # Use a local variable for session state
+    final_session_id_for_turn = session_id_from_cookie
 
     try:
         llm_call_start_time = time.perf_counter()
@@ -669,6 +685,31 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                 app_logger.debug(
                     f"[{client_address_str}] Stream event: {event.name} ({type(event.item)})"
                 )
+
+                if event.name == "tool_called":
+                    # Type-safe check for tool calls
+                    if isinstance(event.item, ToolCallItem) and isinstance(
+                        event.item.raw_item, ResponseFunctionToolCall
+                    ):
+                        tool_call = event.item.raw_item
+                        tool_name = tool_call.name
+                        tool_args = {}
+                        if tool_call.arguments:
+                            try:
+                                tool_args = json.loads(tool_call.arguments)
+                            except json.JSONDecodeError:
+                                app_logger.warning(
+                                    f"Could not decode tool arguments: {tool_call.arguments}"
+                                )
+                                continue
+
+                        if tool_name == "assign_session_id":
+                            new_id = tool_args.get("session_id")
+                            if new_id:
+                                app_logger.info(
+                                    f"Session ID '{new_id}' assigned via tool call. Adopting for logging."
+                                )
+                                final_session_id_for_turn = new_id
 
                 if event.name in [
                     "message_chunk_created",
@@ -760,7 +801,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             app_logger.info(
                 f"[{client_address_str}] Successfully streamed full LLM response."
             )
-            return response
+        return response
 
     except Exception:
         app_logger.exception(
@@ -779,20 +820,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
         return response
     finally:
-        final_session_id_for_turn = session_id_from_cookie
-        cookie_match = re.search(
-            r"Set-Cookie:\s*X-Chat-Session-ID=([^;]+)",
-            llm_response_fully_collected_text_for_log,
-            re.IGNORECASE,
-        )
-        if cookie_match:
-            new_id = cookie_match.group(1).strip()
-            if new_id != final_session_id_for_turn:
-                app_logger.info(
-                    f"New session ID '{new_id}' detected from LLM's Set-Cookie header. Adopting for logging."
-                )
-                final_session_id_for_turn = new_id
-
         if final_session_id_for_turn:
             await current_session_store.record_turn(
                 final_session_id_for_turn, "user", raw_request_text
@@ -946,6 +973,7 @@ def create_app(config: Config) -> web.Application:
     app["global_state"] = {}
     app["config"] = config
     app["session_store"] = session_store
+    app["error_llm_system_prompt_template"] = config.error_llm_system_prompt_template
 
     app.router.add_route("*", "/{path:.*}", handle_http_request)
 

@@ -7,6 +7,7 @@ class MCPConfig(BaseModel):
     """
     Configuration for an individual MCP server.
     """
+
     type: Literal["stdio", "sse", "streamable_http"]
     command: Optional[str] = None
     args: Optional[List[str]] = None
@@ -19,6 +20,7 @@ class Config(BaseModel):
     """
     Typed configuration for HTTP LLM Server, loaded from environment variables or CLI args.
     """
+
     port: int = Field(8080, env="PORT")
     api_key: str = Field(..., env="OPENAI_API_KEY")
     openai_base_url: Optional[str] = Field(None, env="OPENAI_BASE_URL")
@@ -44,4 +46,4 @@ class Config(BaseModel):
                 return json.loads(v)
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON for MCP_SERVERS: {e}")
-        return v 
+        return v
