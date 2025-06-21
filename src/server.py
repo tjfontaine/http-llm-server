@@ -569,8 +569,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         full_history = await current_session_store.get_history(session_id_from_cookie)
         # Strip extra keys from history that the LLM API might reject
         history = [
-            {"role": turn["role"], "content": turn["content"]}
-            for turn in full_history
+            {"role": turn["role"], "content": turn["content"]} for turn in full_history
         ]
         current_token_count = await current_session_store.get_token_count(
             session_id_from_cookie
