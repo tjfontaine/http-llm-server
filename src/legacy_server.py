@@ -20,19 +20,15 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import asyncio
 import http.cookies
 import http.server
 import json
 import logging
-import os
-import re
 import sys
 import time
 from email.utils import formatdate
 
 import jinja2
-import yaml
 from agents import (
     Agent,
     AsyncOpenAI,
@@ -54,8 +50,8 @@ from openai.types.responses import ResponseFunctionToolCall
 from .local_tools import create_local_tools_stdio_server
 from src.config import Config
 from .logging_config import configure_logging, get_loggers
-from .server.models import ConversationHistory
 from .server.session import AbstractSessionStore, InMemorySessionStore
+from .server.parsing import get_raw_request_aiohttp
 
 
 # Default web app file path
@@ -74,37 +70,6 @@ LLM_HTTP_SERVER_PROMPT_BASE = ""  # This will be loaded from a file
 # --- Logging Configuration (Global for simplicity, initialized early) ---
 # Initialize with default logging - will be reconfigured when config is available
 app_logger, access_logger, conversation_logger = get_loggers()
-
-
-def _parse_webapp_file(file_path):
-    """
-    Parse a markdown file with YAML front matter.
-    Returns a tuple of (yaml_data, markdown_content).
-    """
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        if content.startswith("---\n"):
-            match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
-            if match:
-                yaml_content = match.group(1)
-                markdown_content = match.group(2)
-                yaml_data = yaml.safe_load(yaml_content) if yaml_content.strip() else {}
-                return yaml_data, markdown_content.strip()
-
-            app_logger.warning(f"Invalid YAML front matter format in {file_path}")
-            return {}, content
-
-        # No front matter, treat as plain markdown/text
-        return {}, content
-
-    except yaml.YAMLError as e:
-        app_logger.error(f"YAML parsing error in {file_path}: {e}")
-        return {}, ""
-    except Exception as e:
-        app_logger.error(f"Error reading webapp file {file_path}: {e}")
-        return {}, ""
 
 
 async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application):
@@ -225,32 +190,6 @@ async def _initialize_mcp_servers_and_agent(config: Config, app: web.Application
     return agent
 
 
-# Ensure these helpers are defined before handle_http_request
-async def _get_raw_request_aiohttp(request: web.Request) -> str:
-    """
-    Constructs the raw HTTP request string from an aiohttp.web.Request object.
-    """
-    raw_request_line_str = f"{request.method} {request.path_qs} HTTP/{request.version.major}.{request.version.minor}"
-    header_lines = [f"{key}: {value}" for key, value in request.headers.items()]
-    body_str = ""
-    if request.can_read_body:
-        body_bytes = await request.read()
-        charset = request.charset or "utf-8"
-        try:
-            body_str = body_bytes.decode(charset)
-        except (UnicodeDecodeError, LookupError):
-            app_logger.warning(
-                f"Could not decode request body with charset {charset}, used latin-1 fallback."
-            )
-            body_str = body_bytes.decode("latin-1", "replace")
-
-    full_request_parts = [raw_request_line_str] + header_lines
-    if body_str or request.can_read_body:
-        full_request_parts.append("")
-        full_request_parts.append(body_str)
-    return "\r\n".join(full_request_parts)
-
-
 async def _send_llm_error_response_aiohttp(
     request: web.Request, status_code: int, message: str, error_details: str = ""
 ) -> web.Response:
@@ -364,7 +303,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     )
 
     current_session_store: AbstractSessionStore = request.app["session_store"]
-    raw_request_text = await _get_raw_request_aiohttp(request)
+    raw_request_text = await get_raw_request_aiohttp(request)
 
     session_id_from_cookie = None
     cookie_header = request.headers.get("Cookie")

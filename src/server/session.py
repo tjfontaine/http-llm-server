@@ -159,4 +159,4 @@ class InMemorySessionStore(AbstractSessionStore):
         finally:
             self._logger.info(
                 "Conversation saving to disk completed (via InMemorySessionStore)."
-            ) 
+            )
