@@ -29,7 +29,6 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 from email.utils import formatdate
 
 import jinja2
@@ -55,6 +54,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from .local_tools import AbstractSessionStore, create_local_tools_stdio_server
 from src.config import Config
 from .logging_config import configure_logging, get_loggers
+from .server.models import ConversationHistory
 
 
 # Default web app file path
@@ -66,7 +66,7 @@ class InMemorySessionStore(AbstractSessionStore):
     """In-memory implementation of the session store."""
 
     def __init__(self, save_to_disk: bool = True):
-        self._histories: dict[str, list[dict]] = {}
+        self._histories: dict[str, ConversationHistory] = {}
         self._token_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._save_to_disk = save_to_disk
@@ -74,10 +74,10 @@ class InMemorySessionStore(AbstractSessionStore):
         self._logger = logging.getLogger("llm_http_server_app")
         self._conversation_logger = logging.getLogger("conversation_history")
 
-    async def get_history(self, session_id: str) -> list[dict]:
+    async def get_history(self, session_id: str) -> ConversationHistory:
         """Retrieve the conversation history for a given session ID."""
         async with self._lock:
-            return self._histories.get(session_id, [])
+            return self._histories.get(session_id, ConversationHistory())
 
     async def record_turn(self, session_id: str, role: str, text_content: str) -> None:
         """Record a new turn in the conversation history for a given session ID."""
@@ -87,18 +87,15 @@ class InMemorySessionStore(AbstractSessionStore):
             )
             return
         async with self._lock:
-            history = self._histories.setdefault(session_id, [])
-            entry = {
-                "role": role,
-                "content": text_content,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            history.append(entry)
+            history = self._histories.setdefault(session_id, ConversationHistory())
+            history.add_message(role=role, content=text_content)
             self._conversation_logger.info(
-                f"Recorded '{role}' turn for session_id '{session_id}' via InMemorySessionStore. Total turns: {len(history)}"
+                f"Recorded '{role}' turn for session_id '{session_id}' via InMemorySessionStore. Total turns: {len(history.messages)}"
             )
 
-    async def replace_history(self, session_id: str, history: list[dict]) -> None:
+    async def replace_history(
+        self, session_id: str, history: ConversationHistory
+    ) -> None:
         """Replace the entire conversation history for a given session ID."""
         if not session_id:
             self._logger.warning(
@@ -109,7 +106,7 @@ class InMemorySessionStore(AbstractSessionStore):
             self._histories[session_id] = history
             self._token_counts[session_id] = 0  # Reset token count
             self._logger.info(
-                f"Replaced history for session '{session_id}'. New history has {len(history)} turn(s). Token count reset."
+                f"Replaced history for session '{session_id}'. New history has {len(history.messages)} turn(s). Token count reset."
             )
 
     async def get_token_count(self, session_id: str) -> int:
@@ -149,14 +146,14 @@ class InMemorySessionStore(AbstractSessionStore):
                     return
 
                 saved_count = 0
-                for session_id, history_list in self._histories.items():
-                    if not history_list:
+                for session_id, history_obj in self._histories.items():
+                    if not history_obj.messages:
                         continue
                     file_path = os.path.join(log_directory, f"{session_id}.json")
                     try:
                         # Using standard open for simplicity; can be replaced with aiofiles if it becomes a bottleneck.
                         with open(file_path, "w") as f:
-                            json.dump(history_list, f, indent=2)
+                            json.dump(history_obj.model_dump(), f, indent=2)
                         self._logger.info(
                             f"Conversation history for session '{session_id}' saved to {file_path} (via InMemorySessionStore)"
                         )
@@ -513,7 +510,8 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         full_history = await current_session_store.get_history(session_id_from_cookie)
         # Strip extra keys from history that the LLM API might reject
         history = [
-            {"role": turn["role"], "content": turn["content"]} for turn in full_history
+            {"role": turn["role"], "content": turn["content"]}
+            for turn in full_history.messages
         ]
         current_token_count = await current_session_store.get_token_count(
             session_id_from_cookie

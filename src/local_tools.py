@@ -31,12 +31,14 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
 
+from src.server.models import ConversationHistory
+
 
 class AbstractSessionStore(abc.ABC):
     """Abstract base class for session storage."""
 
     @abc.abstractmethod
-    async def get_history(self, session_id: str) -> list[dict]:
+    async def get_history(self, session_id: str) -> ConversationHistory:
         """Retrieve the conversation history for a given session ID."""
         pass
 
@@ -46,7 +48,9 @@ class AbstractSessionStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def replace_history(self, session_id: str, history: list[dict]) -> None:
+    async def replace_history(
+        self, session_id: str, history: ConversationHistory
+    ) -> None:
         """Replace the entire conversation history for a given session ID."""
         pass
 
@@ -130,7 +134,7 @@ async def get_conversation_history(context: Context, session_id: str) -> CallToo
     session_store: AbstractSessionStore = local_mcp_server.session_store
     history = await session_store.get_history(session_id)
     return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps(history, indent=2))]
+        content=[TextContent(type="text", text=history.model_dump_json(indent=2))]
     )
 
 
@@ -143,9 +147,7 @@ async def update_session_history(
     """
     session_store: AbstractSessionStore = local_mcp_server.session_store
     try:
-        new_history = json.loads(new_history_json)
-        if not isinstance(new_history, list):
-            raise TypeError("JSON must decode to a list of message objects.")
+        new_history = ConversationHistory.model_validate_json(new_history_json)
         await session_store.replace_history(session_id, new_history)
         return CallToolResult(
             content=[
