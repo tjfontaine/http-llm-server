@@ -32,42 +32,7 @@ from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
 
 from src.server.models import ConversationHistory
-
-
-class AbstractSessionStore(abc.ABC):
-    """Abstract base class for session storage."""
-
-    @abc.abstractmethod
-    async def get_history(self, session_id: str) -> ConversationHistory:
-        """Retrieve the conversation history for a given session ID."""
-        pass
-
-    @abc.abstractmethod
-    async def record_turn(self, session_id: str, role: str, text_content: str) -> None:
-        """Record a new turn in the conversation history for a given session ID."""
-        pass
-
-    @abc.abstractmethod
-    async def replace_history(
-        self, session_id: str, history: ConversationHistory
-    ) -> None:
-        """Replace the entire conversation history for a given session ID."""
-        pass
-
-    @abc.abstractmethod
-    async def get_token_count(self, session_id: str) -> int:
-        """Retrieve the token count for the last known state of the history."""
-        pass
-
-    @abc.abstractmethod
-    async def update_token_count(self, session_id: str, count: int) -> None:
-        """Update the token count for the session's history."""
-        pass
-
-    @abc.abstractmethod
-    async def save_all_sessions_on_shutdown(self, log_directory: str) -> None:
-        """Save all current session histories, typically on server shutdown."""
-        pass
+from src.server.session import AbstractSessionStore
 
 
 # A server instance is created globally, and tools are registered against it.
