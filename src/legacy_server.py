@@ -23,7 +23,6 @@
 import http.cookies
 import http.server
 import json
-import logging
 import time
 from email.utils import formatdate
 
@@ -31,10 +30,8 @@ import jinja2
 from agents import (
     Runner,
 )
-from agents.items import MessageOutputItem, ToolCallItem
-from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
+from agents.items import MessageOutputItem
 from aiohttp import web
-from openai.types.responses import ResponseFunctionToolCall
 
 from .local_tools import create_local_tools_stdio_server
 from src.config import Config
@@ -42,6 +39,7 @@ from .logging_config import configure_logging, get_loggers
 from .server.session import AbstractSessionStore, InMemorySessionStore
 from .server.parsing import get_raw_request_aiohttp
 from .server.agent_setup import initialize_mcp_servers_and_agent
+from .server.streaming import LLMResponseStreamer
 
 
 # Default web app file path
@@ -280,232 +278,24 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             max_turns=max_turns,
         )
 
-        llm_first_token_time = time.perf_counter()
+        # Delegate the complex streaming logic to the dedicated streamer class
+        streamer = LLMResponseStreamer(client_address_str)
+        response, final_session_id_for_turn, metrics = await streamer.stream_response(
+            request, agent_stream, max_turns, session_id_from_cookie
+        )
 
-        response = web.StreamResponse()
-        response.enable_chunked_encoding(chunk_size=None)
-
-        headers_and_status_parsed = False
-        body_buffer = ""
-
-        # The core of this server: stream the agent's response.
-        # This loop processes events from the agent, including tool calls and content chunks.
-        # A key design element is that the LLM is expected to generate a raw HTTP response,
-        # which this server parses on-the-fly to construct a valid `aiohttp.web.Response`.
-        async for event in agent_stream.stream_events():
-            if isinstance(event, RawResponsesStreamEvent):
-                raw_chunk = event.data
-                if (
-                    hasattr(raw_chunk, "response")
-                    and hasattr(raw_chunk.response, "usage")
-                    and raw_chunk.response.usage
-                ):
-                    usage = raw_chunk.response.usage
-                    app_logger.info(
-                        f"[{client_address_str}] Usage found in stream chunk: {usage}"
-                    )
-                    prompt_tokens_from_usage += usage.input_tokens
-                    completion_tokens_from_usage += usage.output_tokens
-
-            if isinstance(event, RunItemStreamEvent):
-                # Only log meaningful stream events at DEBUG level
-                if event.name in [
-                    "tool_called",
-                    "tool_output",
-                    "message_output_created",
-                ]:
-                    app_logger.debug(
-                        f"[{client_address_str}] Stream event: {event.name}",
-                        extra={"event_type": type(event.item).__name__},
-                    )
-                elif event.name in [
-                    "message_chunk_created"
-                ] and app_logger.isEnabledFor(logging.DEBUG):
-                    # For message chunks, show content preview at DEBUG level
-                    chunk_preview = ""
-                    if hasattr(event.item, "chunk") and hasattr(
-                        event.item.chunk, "text"
-                    ):
-                        chunk_preview = event.item.chunk.text[:50] + (
-                            "..." if len(event.item.chunk.text) > 50 else ""
-                        )
-                    app_logger.debug(
-                        f"[{client_address_str}] Received text chunk",
-                        extra={
-                            "content_preview": chunk_preview,
-                            "chunk_length": len(event.item.chunk.text)
-                            if hasattr(event.item, "chunk")
-                            and hasattr(event.item.chunk, "text")
-                            else 0,
-                        },
-                    )
-
-                if event.name == "tool_called":
-                    # Type-safe check for tool calls
-                    if isinstance(event.item, ToolCallItem) and isinstance(
-                        event.item.raw_item, ResponseFunctionToolCall
-                    ):
-                        tool_call = event.item.raw_item
-                        tool_name = tool_call.name
-                        tool_args = {}
-                        if tool_call.arguments:
-                            try:
-                                tool_args = json.loads(tool_call.arguments)
-                            except json.JSONDecodeError:
-                                app_logger.warning(
-                                    f"Could not decode tool arguments: {tool_call.arguments}",
-                                    extra={
-                                        "tool_name": tool_name,
-                                        "error": "Skipping tool call with no valid arguments",
-                                    },
-                                )
-                                continue
-
-                        # Log tool call with structured information
-                        app_logger.debug(
-                            f"[{client_address_str}] LLM calling tool: {tool_name}",
-                            extra={
-                                "tool_name": tool_name,
-                                "args_count": len(tool_args),
-                                "key_args": str(
-                                    {
-                                        k: str(v)[:50]
-                                        + ("..." if len(str(v)) > 50 else "")
-                                        for k, v in list(tool_args.items())[:3]
-                                    }
-                                )
-                                if tool_args
-                                else "none",
-                            },
-                        )
-
-                        if tool_name == "assign_session_id":
-                            new_id = tool_args.get("session_id")
-                            if new_id:
-                                app_logger.info(
-                                    f"Session ID '{new_id}' assigned via tool call. Adopting for logging."
-                                )
-                                final_session_id_for_turn = new_id
-
-                if event.name in [
-                    "message_chunk_created",
-                    "message_output_created",
-                ]:
-                    chunk = ""
-                    item = event.item
-                    if hasattr(item, "chunk"):
-                        if hasattr(item.chunk, "text"):
-                            chunk = item.chunk.text
-                    elif hasattr(item, "raw_item"):
-                        if isinstance(item.raw_item.content, list):
-                            for part in item.raw_item.content:
-                                if hasattr(part, "text"):
-                                    chunk = part.text
-                                    break
-                        elif hasattr(item.raw_item, "content"):
-                            chunk = str(item.raw_item.content)
-
-                    if not chunk:
-                        continue
-
-                    llm_response_fully_collected_text_for_log += chunk
-
-                    if headers_and_status_parsed:
-                        await response.write(chunk.encode("utf-8"))
-                        continue
-
-                    body_buffer += chunk
-
-                    # The LLM is expected to stream a full HTTP response, headers and body.
-                    # We buffer the initial part of the stream until we find the double newline
-                    # that separates headers from the body.
-                    separator = None
-                    if "\r\n\r\n" in body_buffer:
-                        separator = "\r\n\r\n"
-                    elif "\n\n" in body_buffer:
-                        separator = "\n\n"
-
-                    if separator:
-                        header_section, body_part = body_buffer.split(separator, 1)
-                        headers_and_status_parsed = True
-
-                        lines = header_section.split("\n")
-                        llm_status_code = 200
-                        llm_headers = {}
-                        if lines:
-                            status_line = lines[0].strip()
-                            if status_line.startswith("HTTP/"):
-                                try:
-                                    parts = status_line.split(" ", 2)
-                                    if len(parts) >= 2:
-                                        llm_status_code = int(parts[1])
-                                except (ValueError, IndexError):
-                                    app_logger.warning(
-                                        f"Invalid status line: {status_line}"
-                                    )
-                            for line in lines[1:]:
-                                if ":" in line:
-                                    key, value = line.split(":", 1)
-                                    llm_headers[key.strip()] = value.strip()
-
-                        response.set_status(llm_status_code)
-                        for k, v in llm_headers.items():
-                            response.headers[k] = v
-                        await response.prepare(request)
-
-                        app_logger.debug(
-                            f"[{client_address_str}] Parsed HTTP response headers from LLM",
-                            extra={
-                                "status_code": llm_status_code,
-                                "headers_count": len(llm_headers),
-                                "content_type": llm_headers.get(
-                                    "Content-Type", "unknown"
-                                ),
-                                "body_preview": body_part[:100]
-                                + ("..." if len(body_part) > 100 else "")
-                                if body_part
-                                else "none",
-                            },
-                        )
-                        app_logger.info(
-                            f"[{client_address_str}] Parsed HTTP headers from LLM, streaming response."
-                        )
-
-                        if body_part:
-                            await response.write(body_part.encode("utf-8"))
-            else:
-                # For RawResponsesStreamEvent and other events, only log if they contain useful info
-                if isinstance(
-                    event, RawResponsesStreamEvent
-                ) and app_logger.isEnabledFor(logging.DEBUG):
-                    # Extract useful information from raw response events
-                    if hasattr(event, "item") and hasattr(event.item, "raw_item"):
-                        # Look for finish reason, usage info, etc.
-                        raw_item = event.item.raw_item
-                        debug_info = {}
-                        if (
-                            hasattr(raw_item, "finish_reason")
-                            and raw_item.finish_reason
-                        ):
-                            debug_info["finish_reason"] = raw_item.finish_reason
-                        if hasattr(raw_item, "usage") and raw_item.usage:
-                            debug_info["tokens"] = (
-                                f"input:{raw_item.usage.input_tokens},output:{raw_item.usage.output_tokens}"
-                            )
-
-                        if debug_info:  # Only log if we have useful info
-                            app_logger.debug(
-                                f"[{client_address_str}] Raw response event with metadata",
-                                extra=debug_info,
-                            )
-                elif not isinstance(event, RawResponsesStreamEvent):
-                    # Log other event types that might be interesting
-                    app_logger.debug(
-                        f"[{client_address_str}] Stream event",
-                        extra={"event_type": type(event).__name__},
-                    )
-
-        llm_stream_end_time = time.perf_counter()
+        # Extract metrics from the streamer
+        llm_response_fully_collected_text_for_log = metrics[
+            "llm_response_fully_collected_text_for_log"
+        ]
+        model_error_indicator_for_recording = metrics[
+            "model_error_indicator_for_recording"
+        ]
+        _last_chunk_finish_reason = metrics["_last_chunk_finish_reason"]
+        prompt_tokens_from_usage = metrics["prompt_tokens_from_usage"]
+        completion_tokens_from_usage = metrics["completion_tokens_from_usage"]
+        llm_first_token_time = metrics["llm_first_token_time"]
+        llm_stream_end_time = metrics["llm_stream_end_time"]
 
         if not response.prepared:
             app_logger.warning(

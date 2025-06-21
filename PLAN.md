@@ -51,7 +51,7 @@ each corresponding to a logical git commit.
   2.  Move the `AbstractSessionStore` and `InMemorySessionStore` classes from
       `src/server.py` into `src/server/session.py`.
   3.  Import the new Pydantic models from `src/server/models.py`.
-  4.  Update `create_app` in `src/server.py` to import and use
+  4.  Update `create_app` in `src/legacy_server.py` to import and use
       `InMemorySessionStore` from its new location.
 
 ### Step 3: Modularization - Extract Parsing Helpers
@@ -65,7 +65,7 @@ each corresponding to a logical git commit.
   1.  Create `src/server/parsing.py`.
   2.  Move the `_parse_webapp_file` and `_get_raw_request_aiohttp` functions
       into this new file.
-  3.  Update the call sites within `src/server.py` to use the imported
+  3.  Update the call sites within `src/legacy_server.py` to use the imported
       functions.
 
 ### Step 4: Modularization - Extract Agent & MCP Setup
@@ -78,8 +78,8 @@ each corresponding to a logical git commit.
 - **Actions**:
   1.  Create `src/server/agent_setup.py`.
   2.  Move the `_initialize_mcp_servers_and_agent` function into this new file.
-  3.  Update the `on_startup` hook in `src/server.py` to call this new setup
-      function.
+  3.  Update the `on_startup` hook in `src/legacy_server.py` to call this new
+      setup function.
 
 ### Step 5: Abstraction - Create a Dedicated Streaming Component
 
@@ -149,7 +149,7 @@ each corresponding to a logical git commit.
   2.  Move the `create_app`, `on_startup`, `on_shutdown`, and
       `run_local_tools_stdio_server` functions out of `src/server.py` and into
       `src/app.py`.
-  3.  Delete the now-empty `src/server.py`.
+  3.  Delete the now-empty `src/legacy_server.py`.
   4.  Update `pyproject.toml` if necessary to point to the new entry point
       (`src.app:create_app` or similar).
 
