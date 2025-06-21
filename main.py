@@ -438,6 +438,23 @@ async def _perform_one_shot(app: web.Application, host: str, port: int):
                 # Log the raw HTTP response for evaluation tooling using the standard logger
                 app_logger.info("One-shot raw HTTP response:\n%s", raw_response)
     finally:
+        # In one-shot mode, we need to explicitly shut down the agent's MCP
+        # servers *before* the main web server cleanup. This avoids a race
+        # condition where aiohttp's shutdown cancels the cleanup tasks for the
+        # agent's subprocesses.
+        if "mcp_server_lifecycles" in app and app["mcp_server_lifecycles"]:
+            app_logger.info(
+                f"One-shot mode: Pre-emptively shutting down {len(app['mcp_server_lifecycles'])} MCP server(s)..."
+            )
+            for server in reversed(app["mcp_server_lifecycles"]):
+                try:
+                    await server.__aexit__(None, None, None)
+                    app_logger.info(f"Disconnected from MCP server: {server.name}")
+                except Exception:
+                    app_logger.exception(f"Error cleaning up server: {server.name}")
+            # Clear the list so the standard on_shutdown hook doesn't try again
+            app["mcp_server_lifecycles"].clear()
+
         # Gracefully shut the server down (runs on_shutdown hooks)
         await runner.cleanup()
 
