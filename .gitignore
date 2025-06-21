@@ -13,5 +13,12 @@ conversation_logs/*
 .env
 
 .ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 .python-version
+.env
+/examples/data_dashboard/data/
+.DS_Store
 *.db
