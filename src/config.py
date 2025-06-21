@@ -33,6 +33,7 @@ class Config(BaseModel):
     local_tools_enabled: bool = Field(True, env="LOCAL_TOOLS_ENABLED")
     one_shot: bool = Field(False, env="ONE_SHOT")
     local_tools_stdio: bool = Field(False, env="LOCAL_TOOLS_STDIO")
+    log_level: str = Field("INFO", env="LOG_LEVEL")
     mcp_servers: List[MCPConfig] = Field(default_factory=list, env="MCP_SERVERS")
     webapp_metadata: Dict[str, Any] = Field(default_factory=dict)
     system_prompt_template: Optional[str] = None
@@ -47,3 +48,10 @@ class Config(BaseModel):
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON for MCP_SERVERS: {e}")
         return v
+
+    @validator("log_level")
+    def validate_log_level(cls, v):
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE"]
+        if v.upper() not in valid_levels:
+            raise ValueError(f"log_level must be one of {valid_levels}")
+        return v.upper()

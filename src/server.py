@@ -51,23 +51,14 @@ from agents.model_settings import ModelSettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
 from openai.types.responses import ResponseFunctionToolCall
-from pythonjsonlogger import jsonlogger
-from rich.logging import RichHandler
 
 from .local_tools import AbstractSessionStore, create_local_tools_stdio_server
 from src.config import Config
+from .logging_config import configure_logging, get_loggers
 
 
 # Default web app file path
 DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
-
-
-def get_loggers():
-    return (
-        logging.getLogger("llm_http_server_app"),
-        logging.getLogger("http_access"),
-        logging.getLogger("conversation_history"),
-    )
 
 
 # --- Main Application ---
@@ -197,55 +188,8 @@ LLM_HTTP_SERVER_PROMPT_BASE = ""  # This will be loaded from a file
 
 
 # --- Logging Configuration (Global for simplicity, initialized early) ---
-# Custom formatter for JSON logs
-class CustomJsonFormatter(jsonlogger.JsonFormatter):
-    def add_fields(self, log_record, record, message_dict):
-        super().add_fields(log_record, record, message_dict)
-        if not log_record.get("timestamp"):
-            log_record["timestamp"] = datetime.now(timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
-        if log_record.get("levelname"):
-            log_record["severity"] = log_record["levelname"].upper()
-            del log_record["levelname"]
-        else:
-            log_record["severity"] = "INFO"
-        if not log_record.get("logger"):
-            log_record["logger"] = record.name
-
-
+# Initialize with default logging - will be reconfigured when config is available
 app_logger, access_logger, conversation_logger = get_loggers()
-app_logger.setLevel(logging.INFO)
-access_logger.setLevel(logging.INFO)
-conversation_logger.setLevel(logging.INFO)
-
-# Use the custom JSON formatter
-# The format string for JsonFormatter defines which record attributes to pick for the log output.
-# We can add more fields here if needed, e.g. '%(module)s %(funcName)s'
-json_formatter = CustomJsonFormatter(
-    "%(timestamp)s %(severity)s %(logger)s %(message)s"
-)
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(json_formatter)
-
-# Clear existing handlers and add the new one
-for logger_instance in [app_logger, access_logger, conversation_logger]:
-    if logger_instance.hasHandlers():
-        logger_instance.handlers.clear()
-    # Replace StreamHandler with RichHandler for colorful, readable output
-    rich_handler = RichHandler(
-        rich_tracebacks=True, show_path=False
-    )  # show_path=False to keep logs cleaner
-    logger_instance.addHandler(rich_handler)
-    logger_instance.propagate = False  # Prevent duplicate logs from root logger
-
-
-# --- MCP Tool Call Logging ---
-# McpAgentClient handles tool call logging internally, so no monkey-patching is needed.
-app_logger.info(
-    "McpAgentClient handles tool call logging internally. No monkey-patching needed."
-)
 
 
 def _parse_webapp_file(file_path):
@@ -623,6 +567,15 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
     try:
         llm_call_start_time = time.perf_counter()
+        app_logger.debug(
+            f"[{client_address_str}] Starting LLM request processing",
+            extra={
+                "session_id": session_id_from_cookie or "new",
+                "history_turns": len(history),
+                "token_count": current_token_count,
+                "max_turns": max_turns,
+            },
+        )
         app_logger.info(f"[{client_address_str}] Processing LLM request...")
 
         agent_stream = Runner.run_streamed(
@@ -659,9 +612,37 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                     completion_tokens_from_usage += usage.output_tokens
 
             if isinstance(event, RunItemStreamEvent):
-                app_logger.debug(
-                    f"[{client_address_str}] Stream event: {event.name} ({type(event.item)})"
-                )
+                # Only log meaningful stream events at DEBUG level
+                if event.name in [
+                    "tool_called",
+                    "tool_output",
+                    "message_output_created",
+                ]:
+                    app_logger.debug(
+                        f"[{client_address_str}] Stream event: {event.name}",
+                        extra={"event_type": type(event.item).__name__},
+                    )
+                elif event.name in [
+                    "message_chunk_created"
+                ] and app_logger.isEnabledFor(logging.DEBUG):
+                    # For message chunks, show content preview at DEBUG level
+                    chunk_preview = ""
+                    if hasattr(event.item, "chunk") and hasattr(
+                        event.item.chunk, "text"
+                    ):
+                        chunk_preview = event.item.chunk.text[:50] + (
+                            "..." if len(event.item.chunk.text) > 50 else ""
+                        )
+                    app_logger.debug(
+                        f"[{client_address_str}] Received text chunk",
+                        extra={
+                            "content_preview": chunk_preview,
+                            "chunk_length": len(event.item.chunk.text)
+                            if hasattr(event.item, "chunk")
+                            and hasattr(event.item.chunk, "text")
+                            else 0,
+                        },
+                    )
 
                 if event.name == "tool_called":
                     # Type-safe check for tool calls
@@ -676,9 +657,31 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                                 tool_args = json.loads(tool_call.arguments)
                             except json.JSONDecodeError:
                                 app_logger.warning(
-                                    f"Could not decode tool arguments: {tool_call.arguments}"
+                                    f"Could not decode tool arguments: {tool_call.arguments}",
+                                    extra={
+                                        "tool_name": tool_name,
+                                        "error": "Skipping tool call with no valid arguments",
+                                    },
                                 )
                                 continue
+
+                        # Log tool call with structured information
+                        app_logger.debug(
+                            f"[{client_address_str}] LLM calling tool: {tool_name}",
+                            extra={
+                                "tool_name": tool_name,
+                                "args_count": len(tool_args),
+                                "key_args": str(
+                                    {
+                                        k: str(v)[:50]
+                                        + ("..." if len(str(v)) > 50 else "")
+                                        for k, v in list(tool_args.items())[:3]
+                                    }
+                                )
+                                if tool_args
+                                else "none",
+                            },
+                        )
 
                         if tool_name == "assign_session_id":
                             new_id = tool_args.get("session_id")
@@ -753,6 +756,21 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                         for k, v in llm_headers.items():
                             response.headers[k] = v
                         await response.prepare(request)
+
+                        app_logger.debug(
+                            f"[{client_address_str}] Parsed HTTP response headers from LLM",
+                            extra={
+                                "status_code": llm_status_code,
+                                "headers_count": len(llm_headers),
+                                "content_type": llm_headers.get(
+                                    "Content-Type", "unknown"
+                                ),
+                                "body_preview": body_part[:100]
+                                + ("..." if len(body_part) > 100 else "")
+                                if body_part
+                                else "none",
+                            },
+                        )
                         app_logger.info(
                             f"[{client_address_str}] Parsed HTTP headers from LLM, streaming response."
                         )
@@ -760,9 +778,36 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                         if body_part:
                             await response.write(body_part.encode("utf-8"))
             else:
-                app_logger.debug(
-                    f"[{client_address_str}] Stream event: {type(event).__name__}"
-                )
+                # For RawResponsesStreamEvent and other events, only log if they contain useful info
+                if isinstance(
+                    event, RawResponsesStreamEvent
+                ) and app_logger.isEnabledFor(logging.DEBUG):
+                    # Extract useful information from raw response events
+                    if hasattr(event, "item") and hasattr(event.item, "raw_item"):
+                        # Look for finish reason, usage info, etc.
+                        raw_item = event.item.raw_item
+                        debug_info = {}
+                        if (
+                            hasattr(raw_item, "finish_reason")
+                            and raw_item.finish_reason
+                        ):
+                            debug_info["finish_reason"] = raw_item.finish_reason
+                        if hasattr(raw_item, "usage") and raw_item.usage:
+                            debug_info["tokens"] = (
+                                f"input:{raw_item.usage.input_tokens},output:{raw_item.usage.output_tokens}"
+                            )
+
+                        if debug_info:  # Only log if we have useful info
+                            app_logger.debug(
+                                f"[{client_address_str}] Raw response event with metadata",
+                                extra=debug_info,
+                            )
+                elif not isinstance(event, RawResponsesStreamEvent):
+                    # Log other event types that might be interesting
+                    app_logger.debug(
+                        f"[{client_address_str}] Stream event",
+                        extra={"event_type": type(event).__name__},
+                    )
 
         llm_stream_end_time = time.perf_counter()
 
@@ -869,16 +914,22 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
                     compl_tokens_per_sec_str = "0.00 (no tokens, instantaneous)"
                     compl_tokens_per_sec_val = 0.0
 
-        log_msg_main_part = (
-            f"[{client_address_str}] Request handled. "
-            f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, LLM_StreamDur: {duration_llm_stream_str}, "
-            f"PToken: {prompt_tokens_from_usage}, CToken: {completion_tokens_from_usage}, CTPS: {compl_tokens_per_sec_str}, "
-            f"Sess: {final_session_id_for_turn}, "
-            f"FinishReason: {_last_chunk_finish_reason if _last_chunk_finish_reason else 'N/A'}."
+        # Debug timing and response characteristics
+        app_logger.debug(
+            f"[{client_address_str}] Request processing complete",
+            extra={
+                "total_duration": f"{duration:.3f}s",
+                "llm_ttft": ttft_str,
+                "llm_stream_duration": duration_llm_stream_str,
+                "tokens_per_second": compl_tokens_per_sec_str,
+                "response_size_chars": len(llm_response_fully_collected_text_for_log),
+                "session_id": final_session_id_for_turn or "none",
+                "had_errors": bool(model_error_indicator_for_recording),
+            },
         )
 
         access_log_extra = {
-            "client_address": client_address_str,
+            "remote_address": client_address_str,
             "total_duration_seconds": round(duration, 3),
             "llm_ttft_seconds": round(llm_ttft_seconds_val, 3)
             if llm_ttft_seconds_val is not None
@@ -901,7 +952,12 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "llm_finish_reason": _last_chunk_finish_reason,
         }
 
-        log_msg_final = log_msg_main_part
+        log_msg_final = f"[{client_address_str}] Request handled. "
+        log_msg_final += f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, LLM_StreamDur: {duration_llm_stream_str}, "
+        log_msg_final += f"PToken: {prompt_tokens_from_usage}, CToken: {completion_tokens_from_usage}, CTPS: {compl_tokens_per_sec_str}, "
+        log_msg_final += f"Sess: {final_session_id_for_turn}, "
+        log_msg_final += f"FinishReason: {_last_chunk_finish_reason if _last_chunk_finish_reason else 'N/A'}."
+
         if model_error_indicator_for_recording:
             access_log_extra["error_indicator"] = model_error_indicator_for_recording
             access_log_extra["llm_raw_response_on_error"] = (
@@ -949,6 +1005,9 @@ async def on_shutdown(app: web.Application):
 
 def create_app(config: Config) -> web.Application:
     """Initializes and returns the aiohttp application."""
+    # Reconfigure logging with the specified level
+    configure_logging(config.log_level)
+
     # Typed config from Pydantic
     session_store = InMemorySessionStore(save_to_disk=config.save_conversations)
 

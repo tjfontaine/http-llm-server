@@ -6,15 +6,14 @@ import sys
 
 from dotenv import dotenv_values
 from aiohttp import web, ClientSession
-
 from src.server import (
     create_app,
-    get_loggers,
     run_local_tools_stdio_server as run_local_tools,
     _parse_webapp_file,
     DEFAULT_WEB_APP_FILE,
 )
 from src.config import Config
+from src.logging_config import get_loggers, configure_logging
 
 
 def initialize_configuration():
@@ -24,6 +23,23 @@ def initialize_configuration():
     Returns a dictionary containing all resolved configurations and the client.
     Exits if critical configurations (like API key) are missing.
     """
+    # Early log level parsing and configuration - do this first!
+    log_level = None  # Start with None to detect if explicitly set
+    for i, arg in enumerate(sys.argv):
+        if arg == "--log-level" and i + 1 < len(sys.argv):
+            log_level = sys.argv[i + 1].upper()
+            break
+        elif arg.startswith("--log-level="):
+            log_level = arg.split("=", 1)[1].upper()
+            break
+
+    # Only check environment variable if not specified in command line args
+    if log_level is None:
+        log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+    # Configure logging immediately with the determined level
+    configure_logging(log_level)
+
     app_logger, _, __ = get_loggers()
 
     DEFAULT_PORT = 8080
@@ -45,21 +61,27 @@ def initialize_configuration():
         if os.path.isfile(default_env_path):
             env_file_to_load = default_env_path
 
-    if env_file_to_load:
+    if env_file_to_load and os.path.exists(env_file_to_load):
         try:
             env_vars = dotenv_values(env_file_to_load)
             if env_vars:
                 app_logger.info(
-                    f"Loaded environment variables from .env file: {env_file_to_load}"
+                    "Loaded environment variables from .env file",
+                    extra={
+                        "env_file": env_file_to_load,
+                        "keys_count": len(env_vars),
+                        "keys": sorted(env_vars.keys()),
+                    },
                 )
-                app_logger.info(f".env keys loaded: {sorted(env_vars.keys())}")
             else:
                 app_logger.warning(
-                    f".env file specified but empty or not found: {env_file_to_load}"
+                    ".env file specified but empty or not found",
+                    extra={"env_file": env_file_to_load},
                 )
         except Exception as e:
             app_logger.error(f"Error loading .env file '{env_file_to_load}': {e}")
-            env_vars = None
+    elif env_file_to_load:
+        app_logger.warning(f"env-file '{env_file_to_load}' not found.")
 
     def get_env(key, default=None):
         if env_vars is not None and key in env_vars and env_vars[key] is not None:
@@ -152,6 +174,13 @@ def initialize_configuration():
         default=False,
         help=argparse.SUPPRESS,  # Hidden from help
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE"],
+        default=get_env("LOG_LEVEL", "INFO").upper(),
+        help="Set the logging level for the application and all dependencies. TRACE enables DEBUG for all dependencies (default: INFO, or from LOG_LEVEL env var)",
+    )
 
     # Now parse all arguments for real
     args = parser.parse_args()
@@ -180,6 +209,7 @@ def initialize_configuration():
     # Store one-shot flag
     config["ONE_SHOT"] = args.one_shot
     config["LOCAL_TOOLS_STDIO"] = args.local_tools_stdio
+    config["LOG_LEVEL"] = args.log_level
 
     if not config["API_KEY"]:
         app_logger.error(
@@ -348,6 +378,7 @@ def initialize_configuration():
         local_tools_enabled=config["LOCAL_TOOLS_ENABLED"],
         one_shot=config["ONE_SHOT"],
         local_tools_stdio=config["LOCAL_TOOLS_STDIO"],
+        log_level=config["LOG_LEVEL"],
         mcp_servers=config["MCP_SERVERS"],
         webapp_metadata=config["WEBAPP_METADATA"],
         system_prompt_template=config["SYSTEM_PROMPT_TEMPLATE"],
@@ -450,10 +481,11 @@ def run_server():
 
 
 if __name__ == "__main__":
-    # This mechanism decides which server to run based on command-line arguments.
-    # The main web server can spawn this script with '--local-tools-stdio'
-    # to create the separate tools process.
+    # Check for the special --local-tools-stdio flag first, without parsing all args.
+    # This is to avoid conflicts when main.py is run as a subprocess.
     if "--local-tools-stdio" in sys.argv:
+        log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        configure_logging(log_level)
         run_local_tools()
     else:
         run_server()

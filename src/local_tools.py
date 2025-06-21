@@ -30,7 +30,6 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
-from rich.logging import RichHandler
 
 
 class AbstractSessionStore(abc.ABC):
@@ -175,12 +174,4 @@ def create_local_tools_stdio_server(
         yield
 
     local_mcp_server.lifespan = lifespan
-
-    tools_logger = logging.getLogger("local_tools_server")
-    tools_logger.setLevel(logging.INFO)
-    if not tools_logger.handlers:
-        handler = RichHandler(show_path=False)
-        tools_logger.addHandler(handler)
-        tools_logger.propagate = False
-
     return local_mcp_server
