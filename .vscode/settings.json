@@ -10,5 +10,13 @@
   },
   "prettier.printWidth": 80,
   "prettier.proseWrap": "always",
-  "prettier.configPath": ".prettierrc"
-} 
+  "prettier.configPath": ".prettierrc",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.ruff_cache": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "**/.ruff_cache": true
+  }
+}
