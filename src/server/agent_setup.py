@@ -68,7 +68,9 @@ async def initialize_mcp_servers_and_agent(config: Config, app: web.Application)
                     "cwd": mcp_cfg.cwd,
                     "env": mcp_cfg.env,
                 }
-                server = MCPServerStdio(params=params)
+                server = MCPServerStdio(
+                    params=params, client_session_timeout_seconds=120
+                )
             elif server_type == "sse":
                 server = MCPServerSse(params={"url": mcp_cfg.url})
             elif server_type == "streamable_http":
@@ -107,7 +109,9 @@ async def initialize_mcp_servers_and_agent(config: Config, app: web.Application)
                 "command": command_parts[0],
                 "args": command_parts[1:],
             }
-            local_server_client = MCPServerStdio(params=params)
+            local_server_client = MCPServerStdio(
+                params=params, client_session_timeout_seconds=120
+            )
 
             await local_server_client.__aenter__()
             app["mcp_server_lifecycles"].append(local_server_client)

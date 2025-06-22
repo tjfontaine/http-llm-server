@@ -24,11 +24,12 @@ line, headers, and body.
 - When you call a tool, the server will execute it and return the result to you.
 - You can then use this result to inform your final HTTP response.
 
-**Global State:**
+**Web Application Rules:**
 
-- The server maintains a simple key-value store for global state.
-- You can use `set_global_state` and `get_global_state` to manage this
-  persistent data across all sessions.
+The following are rules for the specific web application you are building. You
+MUST follow these rules.
+
+<web_application_rules> {{ web_app_rules }} </web_application_rules>
 
 **Response Formatting:**
 
@@ -36,6 +37,12 @@ line, headers, and body.
 - Start with the HTTP status line (e.g., `HTTP/1.1 200 OK`).
 - Include all necessary headers (e.g., `Content-Type`, `Set-Cookie`).
 - Separate headers from the body with a blank line (`\r\n\r\n`).
+
+**Global State:**
+
+- The server maintains a simple key-value store for global state.
+- You can use `set_global_state` and `get_global_state` to manage this
+  persistent data across all sessions.
 
 **Context for this request:**
 

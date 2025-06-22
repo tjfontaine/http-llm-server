@@ -33,6 +33,7 @@ This module contains the application wiring logic, including:
 import json
 import time
 from email.utils import formatdate
+import os
 
 import jinja2
 from agents import Runner
@@ -90,6 +91,24 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     context_window_max = config.context_window_max
 
     # Prepare Jinja context for system prompt
+    web_app_file = config.web_app_file
+    web_app_dir = (
+        os.path.dirname(os.path.abspath(web_app_file)) if web_app_file else os.getcwd()
+    )
+
+    # First, render the web_app_rules, which may also be a Jinja template
+    rendered_rules = ""
+    if config.web_app_rules:
+        try:
+            rules_template = jinja2.Template(config.web_app_rules)
+            # The rules template may need the web app directory
+            rendered_rules = rules_template.render({"WEB_APP_DIR": web_app_dir})
+        except jinja2.exceptions.TemplateSyntaxError as e:
+            app_logger.warning(
+                f"Jinja2 template syntax error in web_app_rules: {e}. Using raw rules."
+            )
+            rendered_rules = config.web_app_rules
+
     jinja_context = {
         "session_id": session_id_from_cookie or "",
         "global_state": json.dumps(global_state),
@@ -97,6 +116,8 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         "context_window_max": str(context_window_max),
         "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),
         "dynamic_server_name_example": "LLMWebServer/0.1",
+        "WEB_APP_DIR": web_app_dir,
+        "web_app_rules": rendered_rules,
     }
 
     # Render system prompt

@@ -22,10 +22,12 @@
 
 import json
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import aiohttp
 from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
@@ -40,6 +42,46 @@ local_mcp_server = Server(
     title="Local Tools Server",
     description="Provides tools for session and state management.",
 )
+
+
+@local_mcp_server.tool()
+async def download_file(context: Context, url: str, destination: str) -> CallToolResult:
+    """
+    Downloads a file from a URL to a local destination, following redirects.
+    """
+    logging.info(f"START: url={url}, destination={destination}")
+    try:
+        destination_dir = os.path.dirname(destination)
+        if destination_dir:
+            os.makedirs(destination_dir, exist_ok=True)
+            logging.debug(f"Ensured directory exists: {destination_dir}")
+        async with aiohttp.ClientSession() as session:
+            logging.debug("ClientSession created")
+            async with session.get(url, allow_redirects=True, timeout=300) as response:
+                logging.debug(f"HTTP GET status: {response.status}")
+                response.raise_for_status()
+                with open(destination, "wb") as f:
+                    total = 0
+                    while True:
+                        chunk = await response.content.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        total += len(chunk)
+                    logging.debug(f"Wrote {total} bytes to {destination}")
+        file_size = os.path.getsize(destination)
+        logging.info(f"Download successful. File size: {file_size} bytes")
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"File downloaded successfully to {destination} ({file_size} bytes)",
+                )
+            ]
+        )
+    except Exception as e:
+        logging.error(f"Failed to download file from {url}: {e}")
+        raise ValueError(f"Failed to download file from {url}: {e}")
 
 
 @local_mcp_server.tool()
