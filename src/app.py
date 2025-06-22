@@ -226,22 +226,24 @@ async def on_shutdown(app: web.Application):
     """
     app_logger.info("\nServer shutting down (async)...")
 
-    # Close all MCP server connections
-    app_logger.info(f"Closing {len(app['mcp_server_lifecycles'])} MCP server connections...")
-    for mcp_server in app["mcp_server_lifecycles"]:
-        try:
-            await mcp_server.close()
-            app_logger.info(f"Closed MCP server: {mcp_server.params}")
-        except Exception as e:
-            app_logger.error(
-                f"Error closing MCP server {mcp_server.params}: {e}", exc_info=True
-            )
-
     # Save all conversations to disk if enabled
-    if app["config"].save_conversations_on_shutdown:
+    if app["config"].save_conversations:
         log_directory = "conversation_logs"
         current_session_store = app["session_store"]
         await current_session_store.save_all_sessions_on_shutdown(log_directory)
+
+    # Close all MCP server connections
+    app_logger.info(
+        f"Closing {len(app['mcp_server_lifecycles'])} MCP server connections..."
+    )
+    for mcp_server in app["mcp_server_lifecycles"]:
+        try:
+            await mcp_server.cleanup()
+            app_logger.info(f"Closed MCP server: {mcp_server.name}")
+        except Exception as e:
+            app_logger.error(
+                f"Error closing MCP server {mcp_server.name}: {e}", exc_info=True
+            )
 
     app_logger.info("Server shutdown actions completed.")
 
