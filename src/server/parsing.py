@@ -14,6 +14,9 @@ from ..logging_config import get_loggers
 # Get loggers for this module
 app_logger, _, _ = get_loggers()
 
+# Default web app file path
+DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
+
 
 def parse_webapp_file(file_path):
     """

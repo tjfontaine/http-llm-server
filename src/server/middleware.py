@@ -46,14 +46,18 @@ app_logger, access_logger, _ = get_loggers()
 def logging_and_metrics_middleware():
     """
     Middleware factory for logging requests and collecting metrics.
-    
+
     Handles:
     - Request timing (TTFT, total duration)
     - Token counting and completion metrics
     - Final structured logging with performance data
     """
+
     @web.middleware
-    async def middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
+    async def middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
         start_time = time.perf_counter()
         client_address_tuple = request.transport.get_extra_info("peername")
         client_address_str = (
@@ -61,29 +65,33 @@ def logging_and_metrics_middleware():
             if client_address_tuple
             else "Unknown Client"
         )
-        
+
         # Store timing data on request for use by handler
         request["start_time"] = start_time
         request["client_address_str"] = client_address_str
-        
+
         access_logger.info(
             f"[{client_address_str}] Incoming request: {request.method} {request.path_qs}"
         )
-        
+
         response = await handler(request)
-        
+
         # Extract metrics from request context (set by handler or other middleware)
         llm_first_token_time = request.get("llm_first_token_time")
         llm_stream_end_time = request.get("llm_stream_end_time")
         llm_call_start_time = request.get("llm_call_start_time")
-        llm_response_fully_collected_text_for_log = request.get("llm_response_fully_collected_text_for_log", "")
-        model_error_indicator_for_recording = request.get("model_error_indicator_for_recording")
+        llm_response_fully_collected_text_for_log = request.get(
+            "llm_response_fully_collected_text_for_log", ""
+        )
+        model_error_indicator_for_recording = request.get(
+            "model_error_indicator_for_recording"
+        )
         last_chunk_finish_reason = request.get("last_chunk_finish_reason")
         prompt_tokens_from_usage = request.get("prompt_tokens_from_usage", 0)
         completion_tokens_from_usage = request.get("completion_tokens_from_usage", 0)
         final_session_id_for_turn = request.get("final_session_id_for_turn")
         session_id_from_cookie = request.get("session_id_from_cookie")
-        
+
         # Calculate performance metrics
         end_time = time.perf_counter()
         duration = end_time - start_time
@@ -156,7 +164,8 @@ def logging_and_metrics_middleware():
             else compl_tokens_per_sec_val,
             "session_hkey": final_session_id_for_turn,
             "session_log_id": final_session_id_for_turn,
-            "new_session_by_server": final_session_id_for_turn != session_id_from_cookie,
+            "new_session_by_server": final_session_id_for_turn
+            != session_id_from_cookie,
             "http_method": request.method,
             "http_path_qs": request.path_qs,
             "llm_finish_reason": last_chunk_finish_reason,
@@ -176,23 +185,27 @@ def logging_and_metrics_middleware():
             log_msg_final += f" Error: {model_error_indicator_for_recording}."
 
         access_logger.info(log_msg_final, extra=access_log_extra)
-        
+
         return response
-    
+
     return middleware
 
 
 def session_middleware():
     """
     Middleware factory for session management.
-    
+
     Extracts session ID from cookies and attaches session information to the request.
     Stores session ID and session data on the request object for use by handlers.
     """
+
     @web.middleware
-    async def middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
+    async def middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
         client_address_str = request.get("client_address_str", "Unknown Client")
-        
+
         session_id_from_cookie = None
         cookie_header = request.headers.get("Cookie")
         if cookie_header:
@@ -212,20 +225,24 @@ def session_middleware():
 
         # Store session information on request
         request["session_id_from_cookie"] = session_id_from_cookie
-        
+
         # Get session store and attach session data
         current_session_store: AbstractSessionStore = request.app["session_store"]
         request["session_store"] = current_session_store
-        
+
         if session_id_from_cookie:
             # Load session data
-            full_history = await current_session_store.get_history(session_id_from_cookie)
-            current_token_count = await current_session_store.get_token_count(session_id_from_cookie)
-            
+            full_history = await current_session_store.get_history(
+                session_id_from_cookie
+            )
+            current_token_count = await current_session_store.get_token_count(
+                session_id_from_cookie
+            )
+
             # Attach session data to request
             request["session_history"] = full_history
             request["session_token_count"] = current_token_count
-            
+
             # Also store the simplified history format for LLM consumption
             request["llm_history"] = [
                 {"role": turn["role"], "content": turn["content"]}
@@ -236,64 +253,76 @@ def session_middleware():
             request["session_history"] = None
             request["session_token_count"] = 0
             request["llm_history"] = []
-        
+
         return await handler(request)
-    
+
     return middleware
 
 
 def error_handling_middleware():
     """
     Middleware factory for error handling.
-    
+
     Wraps the handler call in a try/except block and invokes the LLM error
     page generator for unhandled exceptions.
     """
+
     @web.middleware
-    async def middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
+    async def middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
         client_address_str = request.get("client_address_str", "Unknown Client")
-        
+
         try:
             return await handler(request)
         except Exception as e:
             app_logger.exception(
                 f"[{client_address_str}] Unhandled exception in request handler: {e}"
             )
-            
+
             # Store error information for logging middleware
             request["model_error_indicator_for_recording"] = "UNHANDLED_EXCEPTION"
             request["llm_response_fully_collected_text_for_log"] = f"ERROR: {str(e)}"
-            
+
             return await send_llm_error_response_aiohttp(
                 request,
                 500,
                 "Internal Server Error",
-                f"An unexpected error occurred: {str(e)}"
+                f"An unexpected error occurred: {str(e)}",
             )
-    
+
     return middleware
 
 
 def session_cleanup_middleware():
     """
     Middleware factory for session cleanup after request processing.
-    
+
     Records conversation turns and updates token counts after the main handler completes.
     This runs after the handler but before the logging middleware.
     """
+
     @web.middleware
-    async def middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
+    async def middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
         response = await handler(request)
-        
+
         # Extract necessary data from request context
         client_address_str = request.get("client_address_str", "Unknown Client")
         session_store = request.get("session_store")
         final_session_id_for_turn = request.get("final_session_id_for_turn")
         raw_request_text = request.get("raw_request_text", "")
-        llm_response_fully_collected_text_for_log = request.get("llm_response_fully_collected_text_for_log", "")
-        model_error_indicator_for_recording = request.get("model_error_indicator_for_recording")
+        llm_response_fully_collected_text_for_log = request.get(
+            "llm_response_fully_collected_text_for_log", ""
+        )
+        model_error_indicator_for_recording = request.get(
+            "model_error_indicator_for_recording"
+        )
         prompt_tokens_from_usage = request.get("prompt_tokens_from_usage", 0)
-        
+
         # Record conversation turn in session
         if final_session_id_for_turn and session_store:
             await session_store.record_turn(
@@ -320,7 +349,7 @@ def session_cleanup_middleware():
                 f"[{client_address_str}] Could not determine session ID for saving conversation turn. "
                 "LLM may have failed to create a session or set a cookie."
             )
-        
+
         return response
-    
+
     return middleware

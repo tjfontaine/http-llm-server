@@ -20,46 +20,39 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""
+Main application module for the HTTP LLM Server.
+
+This module contains the application wiring logic, including:
+- Application factory function
+- Startup and shutdown handlers
+- Main request handler
+- Local tools stdio server entry point
+"""
+
 import json
 import time
 from email.utils import formatdate
 
 import jinja2
-from agents import (
-    Runner,
-)
+from agents import Runner
 from aiohttp import web
 
+from .config import Config
 from .local_tools import create_local_tools_stdio_server
-from src.config import Config
 from .logging_config import configure_logging, get_loggers
-from .server.session import AbstractSessionStore, InMemorySessionStore
-from .server.parsing import get_raw_request_aiohttp
 from .server.agent_setup import initialize_mcp_servers_and_agent
-from .server.streaming import LLMResponseStreamer
 from .server.errors import send_llm_error_response_aiohttp
 from .server.middleware import (
-    logging_and_metrics_middleware,
-    session_middleware,
     error_handling_middleware,
+    logging_and_metrics_middleware,
     session_cleanup_middleware,
+    session_middleware,
 )
+from .server.parsing import get_raw_request_aiohttp
+from .server.session import AbstractSessionStore, InMemorySessionStore
+from .server.streaming import LLMResponseStreamer
 
-
-# Default web app file path
-DEFAULT_WEB_APP_FILE = "examples/default_info_site/prompt.md"
-
-
-# --- Main Application ---
-# --- Static Prompts and Global State ---
-LLM_HTTP_SERVER_PROMPT_BASE = ""  # This will be loaded from a file
-
-
-# This is loaded by main.py and passed in the config
-# ERROR_LLM_SYSTEM_PROMPT_TEMPLATE = ""
-
-
-# --- Logging Configuration (Global for simplicity, initialized early) ---
 # Initialize with default logging - will be reconfigured when config is available
 app_logger, access_logger, conversation_logger = get_loggers()
 
@@ -71,6 +64,12 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     Most cross-cutting concerns (logging, session management, error handling)
     are now handled by middleware, making this handler focused on its core
     responsibility: coordinating the LLM request processing.
+
+    Core responsibilities:
+    - Prepare the system prompt with Jinja templating
+    - Run the agent stream
+    - Pass the stream to the LLMResponseStreamer
+    - Return the response
     """
     # Get data from middleware
     client_address_str = request["client_address_str"]
@@ -227,6 +226,13 @@ async def on_shutdown(app: web.Application):
 def create_app(config: Config) -> web.Application:
     """
     Create and configure the main aiohttp application.
+
+    This function wires together all the application components:
+    - Configures logging
+    - Sets up session storage
+    - Registers middleware in proper order
+    - Configures routing
+    - Sets up startup/shutdown handlers
     """
     # Reconfigure logging with the specified level
     configure_logging(config.log_level)

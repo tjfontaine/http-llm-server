@@ -6,11 +6,11 @@ import sys
 
 from dotenv import dotenv_values
 from aiohttp import web, ClientSession
-from src.legacy_server import (
+from src.app import (
     create_app,
     run_local_tools_stdio_server as run_local_tools,
-    DEFAULT_WEB_APP_FILE,
 )
+from src.server.parsing import DEFAULT_WEB_APP_FILE
 from src.server.parsing import parse_webapp_file
 from src.config import Config
 from src.logging_config import get_loggers, configure_logging

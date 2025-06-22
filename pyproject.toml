@@ -33,4 +33,4 @@ dependencies = [
 ]
 
 [project.scripts]
-start_server = "server:run_server"
+start_server = "src.app:create_app"
