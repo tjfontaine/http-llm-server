@@ -51,7 +51,8 @@ from .server.middleware import (
     session_middleware,
 )
 from .server.parsing import get_raw_request_aiohttp
-from .server.session import AbstractSessionStore, InMemorySessionStore
+from .server.conversation import HttpConversationStore
+from .server.mcp_session import McpSessionStore
 from .server.streaming import LLMResponseStreamer
 
 # Initialize with default logging - will be reconfigured when config is available
@@ -238,7 +239,7 @@ async def on_shutdown(app: web.Application):
                 )
 
     log_directory = "conversation_logs"
-    current_session_store: AbstractSessionStore = app["session_store"]
+    current_session_store = app["session_store"]
     await current_session_store.save_all_sessions_on_shutdown(log_directory)
 
     app_logger.info("Server shutdown actions completed.")
@@ -258,8 +259,10 @@ def create_app(config: Config) -> web.Application:
     # Reconfigure logging with the specified level
     configure_logging(config.log_level)
 
-    # Typed config from Pydantic
-    session_store = InMemorySessionStore(save_to_disk=config.save_conversations)
+    # Create separate stores for HTTP conversations and MCP session management
+    http_conversation_store = HttpConversationStore(
+        save_to_disk=config.save_conversations
+    )
 
     # Register middlewares in the order they should execute
     # Note: aiohttp middlewares are executed in reverse order of registration
@@ -274,7 +277,7 @@ def create_app(config: Config) -> web.Application:
     )
     app["global_state"] = {}
     app["config"] = config
-    app["session_store"] = session_store
+    app["session_store"] = http_conversation_store  # HTTP conversation store
     app["error_llm_system_prompt_template"] = config.error_llm_system_prompt_template
 
     app.router.add_route("*", "/{path:.*}", handle_http_request)
@@ -289,10 +292,10 @@ def run_local_tools_stdio_server():
     """Entry point for running the local tools server as a stdio MCP server."""
     # This server runs in its own process and has its own independent state.
     app_logger.info("Starting local tools stdio server...")
-    # State is not saved to disk for the subprocess.
-    session_store = InMemorySessionStore(save_to_disk=False)
+    # Create separate MCP session store for the subprocess - not saved to disk
+    mcp_session_store = McpSessionStore()
     global_state = {}
-    tools_app = create_local_tools_stdio_server(global_state, session_store)
+    tools_app = create_local_tools_stdio_server(global_state, mcp_session_store)
 
     # The StdioServer's run() method is async and will run until the process is terminated.
     try:

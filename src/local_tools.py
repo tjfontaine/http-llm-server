@@ -32,8 +32,7 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
 
-from src.server.models import ConversationHistory
-from src.server.session import AbstractSessionStore
+from src.server.mcp_session import McpSessionStore
 
 
 # A server instance is created globally, and tools are registered against it.
@@ -133,47 +132,103 @@ async def get_global_state(context: Context, key: str) -> CallToolResult:
 
 
 @local_mcp_server.tool()
-async def get_conversation_history(context: Context, session_id: str) -> CallToolResult:
+async def set_session_data(
+    context: Context, session_id: str, key: str, value: str
+) -> CallToolResult:
     """
-    Retrieves the full, ordered conversation history for a given session ID.
+    Stores a key-value pair in the MCP session data for the given session.
+    This is separate from HTTP conversation history and is meant for MCP-specific session state.
     """
-    session_store: AbstractSessionStore = local_mcp_server.session_store
-    history = await session_store.get_history(session_id)
+    mcp_session_store: McpSessionStore = local_mcp_server.mcp_session_store
+    await mcp_session_store.set_session_value(session_id, key, value)
+    logging.info(f"Local tool set MCP session data: {session_id}[{key}] = {value}")
     return CallToolResult(
-        content=[TextContent(type="text", text=history.model_dump_json(indent=2))]
+        content=[TextContent(type="text", text=f"Session data set for key '{key}'.")]
     )
 
 
 @local_mcp_server.tool()
-async def update_session_history(
-    context: Context, session_id: str, new_history_json: str
+async def get_session_data(
+    context: Context, session_id: str, key: str = ""
 ) -> CallToolResult:
     """
-    Replaces the entire conversation history for a session with a new one.
+    Retrieves MCP session data for the given session.
+    If key is provided, returns the specific value. If key is empty, returns all session data as JSON.
+    This is separate from HTTP conversation history and contains MCP-specific session state.
     """
-    session_store: AbstractSessionStore = local_mcp_server.session_store
-    try:
-        new_history = ConversationHistory.model_validate_json(new_history_json)
-        await session_store.replace_history(session_id, new_history)
-        return CallToolResult(
-            content=[
-                TextContent(
-                    type="text", text="Conversation history replaced successfully."
-                )
-            ]
+    mcp_session_store: McpSessionStore = local_mcp_server.mcp_session_store
+
+    if key:
+        # Get specific key
+        value = await mcp_session_store.get_session_value(session_id, key)
+        result_text = str(value) if value is not None else ""
+        logging.info(
+            f"Local tool retrieved MCP session data: {session_id}[{key}] -> {value}"
         )
-    except (json.JSONDecodeError, TypeError) as e:
-        raise ValueError(f"Invalid history format: {e}") from e
+    else:
+        # Get all session data
+        session_data = await mcp_session_store.get_session_data(session_id)
+        result_text = json.dumps(session_data, indent=2)
+        logging.info(
+            f"Local tool retrieved all MCP session data for {session_id}: {len(session_data)} keys"
+        )
+
+    return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+
+@local_mcp_server.tool()
+async def delete_session_data(
+    context: Context, session_id: str, key: str = ""
+) -> CallToolResult:
+    """
+    Deletes MCP session data for the given session.
+    If key is provided, deletes the specific key. If key is empty, deletes all session data.
+    This is separate from HTTP conversation history and affects MCP-specific session state.
+    """
+    mcp_session_store: McpSessionStore = local_mcp_server.mcp_session_store
+
+    if key:
+        # Delete specific key
+        existed = await mcp_session_store.delete_session_value(session_id, key)
+        result_text = f"Key '{key}' {'deleted' if existed else 'not found'}."
+        logging.info(
+            f"Local tool deleted MCP session data key: {session_id}[{key}] (existed: {existed})"
+        )
+    else:
+        # Delete entire session
+        existed = await mcp_session_store.delete_session(session_id)
+        result_text = f"Session data {'deleted' if existed else 'not found'}."
+        logging.info(
+            f"Local tool deleted all MCP session data: {session_id} (existed: {existed})"
+        )
+
+    return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+
+@local_mcp_server.tool()
+async def list_sessions(context: Context) -> CallToolResult:
+    """
+    Lists all session IDs that have MCP session data.
+    This shows sessions from the MCP perspective, not HTTP conversation history.
+    """
+    mcp_session_store: McpSessionStore = local_mcp_server.mcp_session_store
+    session_ids = await mcp_session_store.list_sessions()
+    result_text = (
+        json.dumps(session_ids, indent=2) if session_ids else "No MCP sessions found."
+    )
+
+    logging.info(f"Local tool listed MCP sessions: {len(session_ids)} sessions")
+    return CallToolResult(content=[TextContent(type="text", text=result_text)])
 
 
 def create_local_tools_stdio_server(
-    global_state: dict, session_store: AbstractSessionStore
+    global_state: dict, mcp_session_store: McpSessionStore
 ) -> Server:
     """
-    Creates the StdioServer application for the local tools.
+    Creates the StdioServer application for the local tools with separate MCP session store.
     """
     local_mcp_server.global_state = global_state
-    local_mcp_server.session_store = session_store
+    local_mcp_server.mcp_session_store = mcp_session_store
 
     @asynccontextmanager
     async def lifespan(server_instance: Server) -> AsyncIterator[dict]:

@@ -36,7 +36,6 @@ from typing import Callable, Awaitable
 from aiohttp import web
 
 from ..logging_config import get_loggers
-from .session import AbstractSessionStore
 from .errors import send_llm_error_response_aiohttp
 
 # Get loggers for consistent logging throughout the application
@@ -227,7 +226,7 @@ def session_middleware():
         request["session_id_from_cookie"] = session_id_from_cookie
 
         # Get session store and attach session data
-        current_session_store: AbstractSessionStore = request.app["session_store"]
+        current_session_store = request.app["session_store"]
         request["session_store"] = current_session_store
 
         if session_id_from_cookie:
