@@ -245,7 +245,7 @@ def session_middleware():
 
             # Also store the simplified history format for LLM consumption
             request["llm_history"] = [
-                {"role": turn["role"], "content": turn["content"]}
+                {"role": turn.role, "content": turn.content}
                 for turn in full_history.messages
             ]
         else:

@@ -290,7 +290,10 @@ class LLMResponseStreamer:
 
             response.set_status(llm_status_code)
             for k, v in llm_headers.items():
-                response.headers[k] = v
+                # Let aiohttp manage chunking and content length.
+                # The LLM may incorrectly provide these headers.
+                if k.lower() not in ("content-length", "transfer-encoding"):
+                    response.headers[k] = v
             await response.prepare(request)
 
             app_logger.debug(
