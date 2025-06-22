@@ -34,6 +34,7 @@ import json
 import time
 from email.utils import formatdate
 import os
+import asyncio
 
 import jinja2
 from agents import Runner
@@ -220,27 +221,27 @@ async def on_startup(app: web.Application):
 
 
 async def on_shutdown(app: web.Application):
-    """Async operations to perform on server shutdown."""
+    """
+    Actions to perform on server shutdown.
+    """
     app_logger.info("\nServer shutting down (async)...")
 
-    # Disconnect from MCP servers
-    if app.get("mcp_server_lifecycles"):
-        app_logger.info(
-            f"Closing {len(app['mcp_server_lifecycles'])} MCP server connections..."
-        )
-        for mcp_server in app["mcp_server_lifecycles"]:
-            try:
-                await mcp_server.close()
-                app_logger.info(f"Closed MCP server: {mcp_server.params}")
-            except Exception as e:
-                app_logger.error(
-                    f"Error closing MCP server {mcp_server.params}: {e}",
-                    exc_info=True,
-                )
+    # Close all MCP server connections
+    app_logger.info(f"Closing {len(app['mcp_server_lifecycles'])} MCP server connections...")
+    for mcp_server in app["mcp_server_lifecycles"]:
+        try:
+            await mcp_server.close()
+            app_logger.info(f"Closed MCP server: {mcp_server.params}")
+        except Exception as e:
+            app_logger.error(
+                f"Error closing MCP server {mcp_server.params}: {e}", exc_info=True
+            )
 
-    log_directory = "conversation_logs"
-    current_session_store = app["session_store"]
-    await current_session_store.save_all_sessions_on_shutdown(log_directory)
+    # Save all conversations to disk if enabled
+    if app["config"].save_conversations_on_shutdown:
+        log_directory = "conversation_logs"
+        current_session_store = app["session_store"]
+        await current_session_store.save_all_sessions_on_shutdown(log_directory)
 
     app_logger.info("Server shutdown actions completed.")
 
