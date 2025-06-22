@@ -20,8 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import http.cookies
-import http.server
 import json
 import time
 from email.utils import formatdate
@@ -40,6 +38,12 @@ from .server.parsing import get_raw_request_aiohttp
 from .server.agent_setup import initialize_mcp_servers_and_agent
 from .server.streaming import LLMResponseStreamer
 from .server.errors import send_llm_error_response_aiohttp
+from .server.middleware import (
+    logging_and_metrics_middleware,
+    session_middleware,
+    error_handling_middleware,
+    session_cleanup_middleware,
+)
 
 
 # Default web app file path
@@ -61,38 +65,24 @@ app_logger, access_logger, conversation_logger = get_loggers()
 
 
 async def handle_http_request(request: web.Request) -> web.StreamResponse:
-    start_time = time.perf_counter()
-    client_address_tuple = request.transport.get_extra_info("peername")
-    client_address_str = (
-        f"{client_address_tuple[0]}:{client_address_tuple[1]}"
-        if client_address_tuple
-        else "Unknown Client"
-    )
-    access_logger.info(
-        f"[{client_address_str}] Incoming request: {request.method} {request.path_qs}"
-    )
+    """
+    Simplified HTTP request handler.
 
-    current_session_store: AbstractSessionStore = request.app["session_store"]
+    Most cross-cutting concerns (logging, session management, error handling)
+    are now handled by middleware, making this handler focused on its core
+    responsibility: coordinating the LLM request processing.
+    """
+    # Get data from middleware
+    client_address_str = request["client_address_str"]
+    session_id_from_cookie = request["session_id_from_cookie"]
+    history = request["llm_history"]
+    current_token_count = request["session_token_count"]
+
+    # Get raw request text
     raw_request_text = await get_raw_request_aiohttp(request)
+    request["raw_request_text"] = raw_request_text  # Store for middleware use
 
-    session_id_from_cookie = None
-    cookie_header = request.headers.get("Cookie")
-    if cookie_header:
-        try:
-            cookies = http.cookies.SimpleCookie()
-            cookies.load(cookie_header)
-            if "X-Chat-Session-ID" in cookies:
-                session_id_from_cookie = cookies["X-Chat-Session-ID"].value
-                if session_id_from_cookie:
-                    app_logger.info(
-                        f"[{client_address_str}] Existing session ID found in cookie: {session_id_from_cookie}"
-                    )
-        except Exception:
-            app_logger.exception(
-                f"[{client_address_str}] Error parsing 'Cookie' header: '{cookie_header}'. Treating as no session."
-            )
-
-    # Load typed config
+    # Load typed config and app state
     config = request.app["config"]
     system_prompt_template = config.system_prompt_template
     agent = request.app["agent"]
@@ -100,19 +90,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     max_turns = config.max_turns
     context_window_max = config.context_window_max
 
-    history = []
-    current_token_count = 0
-    if session_id_from_cookie:
-        full_history = await current_session_store.get_history(session_id_from_cookie)
-        # Strip extra keys from history that the LLM API might reject
-        history = [
-            {"role": turn["role"], "content": turn["content"]}
-            for turn in full_history.messages
-        ]
-        current_token_count = await current_session_store.get_token_count(
-            session_id_from_cookie
-        )
-
+    # Prepare Jinja context for system prompt
     jinja_context = {
         "session_id": session_id_from_cookie or "",
         "global_state": json.dumps(global_state),
@@ -122,6 +100,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         "dynamic_server_name_example": "LLMWebServer/0.1",
     }
 
+    # Render system prompt
     try:
         template = jinja2.Template(system_prompt_template)
         dynamic_system_prompt = template.render(jinja_context)
@@ -134,6 +113,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "Invalid system prompt template.",
         )
 
+    # Prepare messages for LLM
     messages = [{"role": "system", "content": dynamic_system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": raw_request_text})
@@ -144,214 +124,69 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         f"HistoryTurns={len(history)}, TokenCount={current_token_count}"
     )
 
+    # Reset agent instructions and start LLM processing
     agent.instructions = None
 
-    llm_call_start_time = None
-    llm_first_token_time = None
-    llm_stream_end_time = None
-    llm_response_fully_collected_text_for_log = ""
-    model_error_indicator_for_recording = None
-    _last_chunk_finish_reason = None
-    prompt_tokens_from_usage = 0
-    completion_tokens_from_usage = 0
+    # Store timing for middleware
+    llm_call_start_time = time.perf_counter()
+    request["llm_call_start_time"] = llm_call_start_time
 
-    response = None
-    # Use a local variable for session state to handle cases where the session ID is assigned mid-stream.
-    final_session_id_for_turn = session_id_from_cookie
+    app_logger.debug(
+        f"[{client_address_str}] Starting LLM request processing",
+        extra={
+            "session_id": session_id_from_cookie or "new",
+            "history_turns": len(history),
+            "token_count": current_token_count,
+            "max_turns": max_turns,
+        },
+    )
+    app_logger.info(f"[{client_address_str}] Processing LLM request...")
 
-    try:
-        llm_call_start_time = time.perf_counter()
-        app_logger.debug(
-            f"[{client_address_str}] Starting LLM request processing",
-            extra={
-                "session_id": session_id_from_cookie or "new",
-                "history_turns": len(history),
-                "token_count": current_token_count,
-                "max_turns": max_turns,
-            },
+    # Run the LLM stream
+    agent_stream = Runner.run_streamed(
+        agent,
+        messages,
+        max_turns=max_turns,
+    )
+
+    # Delegate streaming to the dedicated streamer class
+    streamer = LLMResponseStreamer(client_address_str)
+    response, final_session_id_for_turn, metrics = await streamer.stream_response(
+        request, agent_stream, max_turns, session_id_from_cookie
+    )
+
+    # Store metrics and session data on request for middleware use
+    request["llm_response_fully_collected_text_for_log"] = metrics[
+        "llm_response_fully_collected_text_for_log"
+    ]
+    request["model_error_indicator_for_recording"] = metrics[
+        "model_error_indicator_for_recording"
+    ]
+    request["last_chunk_finish_reason"] = metrics["_last_chunk_finish_reason"]
+    request["prompt_tokens_from_usage"] = metrics["prompt_tokens_from_usage"]
+    request["completion_tokens_from_usage"] = metrics["completion_tokens_from_usage"]
+    request["llm_first_token_time"] = metrics["llm_first_token_time"]
+    request["llm_stream_end_time"] = metrics["llm_stream_end_time"]
+    request["final_session_id_for_turn"] = final_session_id_for_turn
+
+    # Validate response
+    if not response.prepared:
+        app_logger.warning(
+            f"[{client_address_str}] LLM stream finished without a valid HTTP response header."
         )
-        app_logger.info(f"[{client_address_str}] Processing LLM request...")
-
-        agent_stream = Runner.run_streamed(
-            agent,
-            messages,
-            max_turns=max_turns,
+        return await send_llm_error_response_aiohttp(
+            request,
+            500,
+            "Internal Server Error",
+            "LLM did not produce a valid HTTP response.",
         )
-
-        # Delegate the complex streaming logic to the dedicated streamer class
-        streamer = LLMResponseStreamer(client_address_str)
-        response, final_session_id_for_turn, metrics = await streamer.stream_response(
-            request, agent_stream, max_turns, session_id_from_cookie
-        )
-
-        # Extract metrics from the streamer
-        llm_response_fully_collected_text_for_log = metrics[
-            "llm_response_fully_collected_text_for_log"
-        ]
-        model_error_indicator_for_recording = metrics[
-            "model_error_indicator_for_recording"
-        ]
-        _last_chunk_finish_reason = metrics["_last_chunk_finish_reason"]
-        prompt_tokens_from_usage = metrics["prompt_tokens_from_usage"]
-        completion_tokens_from_usage = metrics["completion_tokens_from_usage"]
-        llm_first_token_time = metrics["llm_first_token_time"]
-        llm_stream_end_time = metrics["llm_stream_end_time"]
-
-        if not response.prepared:
-            app_logger.warning(
-                f"[{client_address_str}] LLM stream finished without a valid HTTP response header."
-            )
-            return await send_llm_error_response_aiohttp(
-                request,
-                500,
-                "Internal Server Error",
-                "LLM did not produce a valid HTTP response.",
-            )
-        else:
-            await response.write_eof()
-            app_logger.info(
-                f"[{client_address_str}] Successfully streamed full LLM response."
-            )
-        return response
-
-    except Exception:
-        app_logger.exception(
-            f"[{client_address_str}] Unexpected error processing LLM stream:"
-        )
-        model_error_indicator_for_recording = "UNEXPECTED_STREAM_PROCESSING_ERROR"
-        llm_response_fully_collected_text_for_log = "ERROR_UNEXPECTED_STREAM_PROCESSING"
-
-        if response and not response.prepared:
-            return await send_llm_error_response_aiohttp(
-                request,
-                500,
-                "Internal Server Error",
-                "Unexpected error during stream processing.",
-            )
-
-        return response
-    finally:
-        # This block ensures that critical post-request actions are always performed,
-        # such as recording the conversation turn and logging detailed performance metrics.
-        # This is vital for debugging, monitoring, and maintaining session state.
-        if final_session_id_for_turn:
-            await current_session_store.record_turn(
-                final_session_id_for_turn, "user", raw_request_text
-            )
-
-            assistant_content_for_history = llm_response_fully_collected_text_for_log
-            if model_error_indicator_for_recording:
-                assistant_content_for_history = f"[LLM_RESPONSE_STREAM_INTERRUPTED_OR_ERROR: {model_error_indicator_for_recording}]\n\n{llm_response_fully_collected_text_for_log}"
-            elif not llm_response_fully_collected_text_for_log.strip():
-                assistant_content_for_history = "[LLM_EMPTY_RESPONSE_STREAMED]"
-
-            await current_session_store.record_turn(
-                final_session_id_for_turn,
-                "assistant",
-                assistant_content_for_history,
-            )
-            if prompt_tokens_from_usage > 0:
-                await current_session_store.update_token_count(
-                    final_session_id_for_turn, prompt_tokens_from_usage
-                )
-        else:
-            app_logger.error(
-                f"[{client_address_str}] Could not determine session ID for saving conversation turn. "
-                "LLM may have failed to create a session or set a cookie."
-            )
-
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        ttft_str = "N/A"
-        duration_llm_stream_str = "N/A"
-
-        llm_ttft_seconds_val = None
-        if llm_call_start_time and llm_first_token_time:
-            ttft_calc = llm_first_token_time - llm_call_start_time
-            if ttft_calc >= 0:
-                llm_ttft_seconds_val = ttft_calc
-                ttft_str = f"{llm_ttft_seconds_val:.3f}s"
-
-        llm_stream_duration_seconds_val = None
-        if llm_call_start_time and llm_stream_end_time:
-            duration_llm_calc = llm_stream_end_time - llm_call_start_time
-            if duration_llm_calc >= 0:
-                llm_stream_duration_seconds_val = duration_llm_calc
-                duration_llm_stream_str = f"{llm_stream_duration_seconds_val:.3f}s"
-
-        compl_tokens_per_sec_str = "N/A"
-        compl_tokens_per_sec_val = None
-        if llm_stream_duration_seconds_val is not None:
-            if llm_stream_duration_seconds_val > 0:
-                if completion_tokens_from_usage > 0:
-                    tokens_per_sec = (
-                        completion_tokens_from_usage / llm_stream_duration_seconds_val
-                    )
-                    compl_tokens_per_sec_str = f"{tokens_per_sec:.2f}"
-                    compl_tokens_per_sec_val = tokens_per_sec
-                else:
-                    compl_tokens_per_sec_str = "0.00 (no tokens)"
-                    compl_tokens_per_sec_val = 0.0
-            elif llm_stream_duration_seconds_val == 0:
-                if completion_tokens_from_usage > 0:
-                    compl_tokens_per_sec_str = "Infinity"
-                    compl_tokens_per_sec_val = float("inf")
-                else:
-                    compl_tokens_per_sec_str = "0.00 (no tokens, instantaneous)"
-                    compl_tokens_per_sec_val = 0.0
-
-        # Debug timing and response characteristics
-        app_logger.debug(
-            f"[{client_address_str}] Request processing complete",
-            extra={
-                "total_duration": f"{duration:.3f}s",
-                "llm_ttft": ttft_str,
-                "llm_stream_duration": duration_llm_stream_str,
-                "tokens_per_second": compl_tokens_per_sec_str,
-                "response_size_chars": len(llm_response_fully_collected_text_for_log),
-                "session_id": final_session_id_for_turn or "none",
-                "had_errors": bool(model_error_indicator_for_recording),
-            },
+    else:
+        await response.write_eof()
+        app_logger.info(
+            f"[{client_address_str}] Successfully streamed full LLM response."
         )
 
-        access_log_extra = {
-            "remote_address": client_address_str,
-            "total_duration_seconds": round(duration, 3),
-            "llm_ttft_seconds": round(llm_ttft_seconds_val, 3)
-            if llm_ttft_seconds_val is not None
-            else None,
-            "llm_stream_duration_seconds": round(llm_stream_duration_seconds_val, 3)
-            if llm_stream_duration_seconds_val is not None
-            else None,
-            "prompt_tokens": prompt_tokens_from_usage,
-            "completion_tokens": completion_tokens_from_usage,
-            "completion_tokens_per_second": round(compl_tokens_per_sec_val, 2)
-            if compl_tokens_per_sec_val is not None
-            and compl_tokens_per_sec_val != float("inf")
-            else compl_tokens_per_sec_val,
-            "session_hkey": final_session_id_for_turn,
-            "session_log_id": final_session_id_for_turn,
-            "new_session_by_server": final_session_id_for_turn
-            != session_id_from_cookie,
-            "http_method": request.method,
-            "http_path_qs": request.path_qs,
-            "llm_finish_reason": _last_chunk_finish_reason,
-        }
-
-        log_msg_final = f"[{client_address_str}] Request handled. "
-        log_msg_final += f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, LLM_StreamDur: {duration_llm_stream_str}, "
-        log_msg_final += f"PToken: {prompt_tokens_from_usage}, CToken: {completion_tokens_from_usage}, CTPS: {compl_tokens_per_sec_str}, "
-        log_msg_final += f"Sess: {final_session_id_for_turn}, "
-        log_msg_final += f"FinishReason: {_last_chunk_finish_reason if _last_chunk_finish_reason else 'N/A'}."
-
-        if model_error_indicator_for_recording:
-            access_log_extra["error_indicator"] = model_error_indicator_for_recording
-            access_log_extra["llm_raw_response_on_error"] = (
-                llm_response_fully_collected_text_for_log
-            )
-            log_msg_final += f" Error: {model_error_indicator_for_recording}."
-
-        access_logger.info(log_msg_final, extra=access_log_extra)
+    return response
 
 
 async def on_startup(app: web.Application):
@@ -399,7 +234,17 @@ def create_app(config: Config) -> web.Application:
     # Typed config from Pydantic
     session_store = InMemorySessionStore(save_to_disk=config.save_conversations)
 
-    app = web.Application()
+    # Register middlewares in the order they should execute
+    # Note: aiohttp middlewares are executed in reverse order of registration
+    # So the last registered middleware is the first to run
+    app = web.Application(
+        middlewares=[
+            logging_and_metrics_middleware(),  # Last - handles final logging and metrics
+            session_cleanup_middleware(),  # Third - records session data after handler
+            error_handling_middleware(),  # Second - catches errors from handler
+            session_middleware(),  # First - extracts session data from request
+        ]
+    )
     app["global_state"] = {}
     app["config"] = config
     app["session_store"] = session_store
