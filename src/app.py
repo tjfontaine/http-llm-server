@@ -34,7 +34,6 @@ import json
 import time
 from email.utils import formatdate
 import os
-import asyncio
 
 import jinja2
 from agents import Runner
@@ -42,7 +41,7 @@ from aiohttp import web
 
 from .config import Config
 from .local_tools import create_local_tools_stdio_server
-from .logging_config import configure_logging, get_loggers
+from .logging_config import get_loggers
 from .server.agent_setup import initialize_mcp_servers_and_agent
 from .server.errors import send_llm_error_response_aiohttp
 from .server.middleware import (
@@ -194,7 +193,8 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # Validate response
     if not response.prepared:
         app_logger.warning(
-            f"[{client_address_str}] LLM stream finished without a valid HTTP response header."
+            f"[{client_address_str}] LLM stream finished without a valid HTTP response header. "
+            f"LLM Output: {metrics['llm_response_fully_collected_text_for_log']}"
         )
         return await send_llm_error_response_aiohttp(
             request,
@@ -250,37 +250,22 @@ async def on_shutdown(app: web.Application):
 
 def create_app(config: Config) -> web.Application:
     """
-    Create and configure the main aiohttp application.
-
-    This function wires together all the application components:
-    - Configures logging
-    - Sets up session storage
-    - Registers middleware in proper order
-    - Configures routing
-    - Sets up startup/shutdown handlers
+    Application factory.
     """
-    # Reconfigure logging with the specified level
-    configure_logging(config.log_level)
-
-    # Create separate stores for HTTP conversations and MCP session management
-    http_conversation_store = HttpConversationStore(
-        save_to_disk=config.save_conversations
-    )
-
-    # Register middlewares in the order they should execute
-    # Note: aiohttp middlewares are executed in reverse order of registration
-    # So the last registered middleware is the first to run
+    # Create the web application
     app = web.Application(
         middlewares=[
-            logging_and_metrics_middleware(),  # Last - handles final logging and metrics
-            session_cleanup_middleware(),  # Third - records session data after handler
-            error_handling_middleware(),  # Second - catches errors from handler
-            session_middleware(),  # First - extracts session data from request
+            logging_and_metrics_middleware(),
+            session_cleanup_middleware(),
+            error_handling_middleware(),
+            session_middleware(),
         ]
     )
+
+    # Store config and initialize state stores
     app["global_state"] = {}
     app["config"] = config
-    app["session_store"] = http_conversation_store  # HTTP conversation store
+    app["session_store"] = HttpConversationStore(save_to_disk=config.save_conversations)
     app["error_llm_system_prompt_template"] = config.error_llm_system_prompt_template
 
     app.router.add_route("*", "/{path:.*}", handle_http_request)

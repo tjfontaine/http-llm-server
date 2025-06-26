@@ -24,10 +24,13 @@ import json
 import logging
 import os
 import uuid
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import aiohttp
+import aiofiles
 from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
@@ -44,43 +47,204 @@ local_mcp_server = Server(
 
 
 @local_mcp_server.tool()
-async def download_file(context: Context, url: str, destination: str) -> CallToolResult:
+async def download_file(
+    context: Context, url: str, destination: str, max_retries: int = 3
+) -> CallToolResult:
     """
     Downloads a file from a URL to a local destination, following redirects.
+    Includes retry logic, proper headers, and robust error handling.
+
+    Args:
+        url: The URL to download from
+        destination: Local file path to save to
+        max_retries: Maximum number of retry attempts (default: 3)
     """
-    logging.info(f"START: url={url}, destination={destination}")
-    try:
-        destination_dir = os.path.dirname(destination)
-        if destination_dir:
-            os.makedirs(destination_dir, exist_ok=True)
-            logging.debug(f"Ensured directory exists: {destination_dir}")
-        async with aiohttp.ClientSession() as session:
-            logging.debug("ClientSession created")
-            async with session.get(url, allow_redirects=True, timeout=300) as response:
-                logging.debug(f"HTTP GET status: {response.status}")
-                response.raise_for_status()
-                with open(destination, "wb") as f:
-                    total = 0
-                    while True:
-                        chunk = await response.content.read(8192)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        total += len(chunk)
-                    logging.debug(f"Wrote {total} bytes to {destination}")
-        file_size = os.path.getsize(destination)
-        logging.info(f"Download successful. File size: {file_size} bytes")
-        return CallToolResult(
-            content=[
-                TextContent(
-                    type="text",
-                    text=f"File downloaded successfully to {destination} ({file_size} bytes)",
-                )
-            ]
-        )
-    except Exception as e:
-        logging.error(f"Failed to download file from {url}: {e}")
-        raise ValueError(f"Failed to download file from {url}: {e}")
+    logging.info(
+        f"START: url={url}, destination={destination}, max_retries={max_retries}"
+    )
+
+    # Prepare destination directory
+    destination_dir = os.path.dirname(destination)
+    if destination_dir:
+        os.makedirs(destination_dir, exist_ok=True)
+        logging.debug(f"Ensured directory exists: {destination_dir}")
+
+    # Headers to make requests more reliable
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; http-llm-server/1.0)",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
+
+    # SSL context configuration
+    connector = aiohttp.TCPConnector(
+        limit=10,
+        limit_per_host=3,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        ssl=False,  # Allow SSL certificate issues to be handled gracefully
+    )
+
+    timeout = aiohttp.ClientTimeout(total=600, connect=30, sock_read=30)
+
+    last_exception: Optional[Exception] = None
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            wait_time = min(2**attempt, 60)  # Exponential backoff, max 60s
+            logging.info(
+                f"Retry attempt {attempt}/{max_retries} after {wait_time}s delay"
+            )
+            await asyncio.sleep(wait_time)
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=connector, timeout=timeout, headers=headers
+            ) as session:
+                logging.debug(f"Attempt {attempt + 1}: Making request to {url}")
+
+                async with session.get(url, allow_redirects=True) as response:
+                    logging.debug(f"HTTP {response.status}: {response.reason}")
+
+                    # Handle HTTP errors
+                    if response.status == 404:
+                        raise ValueError(f"File not found (404): {url}")
+                    elif response.status == 403:
+                        raise ValueError(f"Access forbidden (403): {url}")
+                    elif response.status == 429:
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                            message="Rate limited",
+                        )
+                    elif response.status >= 500:
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                            message=f"Server error: {response.status}",
+                        )
+
+                    response.raise_for_status()
+
+                    # Log response details
+                    content_length = response.headers.get("Content-Length")
+                    content_type = response.headers.get("Content-Type", "unknown")
+                    logging.info(
+                        f"Content-Type: {content_type}, Content-Length: {content_length}"
+                    )
+
+                    # Download file using async file operations
+                    total_bytes = 0
+                    chunk_size = 8192
+
+                    try:
+                        async with aiofiles.open(destination, "wb") as f:
+                            async for chunk in response.content.iter_chunked(
+                                chunk_size
+                            ):
+                                await f.write(chunk)
+                                total_bytes += len(chunk)
+
+                                # Log progress for large files
+                                if (
+                                    content_length and total_bytes % (1024 * 1024) == 0
+                                ):  # Every MB
+                                    progress = (total_bytes / int(content_length)) * 100
+                                    logging.debug(
+                                        f"Download progress: {progress:.1f}% ({total_bytes} bytes)"
+                                    )
+
+                        # Verify the download
+                        if not os.path.exists(destination):
+                            raise FileNotFoundError(
+                                f"Downloaded file not found at {destination}"
+                            )
+
+                        file_size = os.path.getsize(destination)
+                        if file_size == 0:
+                            raise ValueError("Downloaded file is empty")
+
+                        # Verify size if Content-Length was provided
+                        if content_length and file_size != int(content_length):
+                            logging.warning(
+                                f"File size mismatch: expected {content_length}, got {file_size}"
+                            )
+
+                        logging.info(
+                            f"Download successful: {file_size} bytes written to {destination}"
+                        )
+                        return CallToolResult(
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=f"File downloaded successfully to {destination} ({file_size:,} bytes, Content-Type: {content_type})",
+                                )
+                            ]
+                        )
+
+                    except Exception as file_error:
+                        # Clean up partial download
+                        if os.path.exists(destination):
+                            try:
+                                os.remove(destination)
+                                logging.debug(
+                                    f"Cleaned up partial download: {destination}"
+                                )
+                            except OSError:
+                                pass
+                        raise file_error
+
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            last_exception = e
+            error_type = type(e).__name__
+
+            # Determine if this is retryable
+            retryable = isinstance(
+                e,
+                (
+                    aiohttp.ClientConnectionError,
+                    aiohttp.ServerTimeoutError,
+                    asyncio.TimeoutError,
+                    aiohttp.ClientPayloadError,
+                ),
+            ) or (isinstance(e, aiohttp.ClientResponseError) and e.status >= 500)
+
+            if not retryable or attempt == max_retries:
+                logging.error(f"Download failed ({error_type}): {e}")
+                # Clean up any partial download
+                if os.path.exists(destination):
+                    try:
+                        os.remove(destination)
+                        logging.debug(f"Cleaned up partial download: {destination}")
+                    except OSError:
+                        pass
+                break
+            else:
+                logging.warning(f"Retryable error ({error_type}): {e}")
+
+        except Exception as e:
+            # Non-retryable errors
+            last_exception = e
+            logging.error(f"Non-retryable download error: {e}")
+            # Clean up any partial download
+            if os.path.exists(destination):
+                try:
+                    os.remove(destination)
+                    logging.debug(f"Cleaned up partial download: {destination}")
+                except OSError:
+                    pass
+            break
+
+    # If we reach here, all retries failed
+    error_msg = f"Failed to download file from {url} after {max_retries + 1} attempts"
+    if last_exception:
+        error_msg += f": {last_exception}"
+
+    logging.error(error_msg)
+    raise ValueError(error_msg)
 
 
 @local_mcp_server.tool()

@@ -166,6 +166,20 @@ class LLMResponseStreamer:
 
         self.llm_stream_end_time = time.perf_counter()
 
+        # If the stream ends and we have a buffer that looks like a response
+        # but without the final separator, we process it as a headers-only response.
+        if not self.headers_and_status_parsed and self.body_buffer.strip().startswith(
+            "HTTP/"
+        ):
+            app_logger.info(
+                f"[{self.client_address_str}] Stream ended with unparsed headers. "
+                "Attempting to parse as headers-only response."
+            )
+            # Treat the whole buffer as headers, with an empty body
+            await self._parse_and_prepare_response(
+                self.body_buffer, "", response, request
+            )
+
         # Prepare metrics dictionary
         metrics = {
             "llm_response_fully_collected_text_for_log": self.llm_response_fully_collected_text_for_log,
@@ -246,6 +260,60 @@ class LLMResponseStreamer:
                 chunk = str(item.raw_item.content)
         return chunk
 
+    async def _parse_and_prepare_response(
+        self,
+        header_section: str,
+        body_part: str,
+        response: web.StreamResponse,
+        request: web.Request,
+    ):
+        """Parses the header section and prepares the aiohttp response."""
+        self.headers_and_status_parsed = True
+
+        lines = header_section.split("\n")
+        llm_status_code = 200
+        llm_headers = {}
+        if lines:
+            status_line = lines[0].strip()
+            if status_line.startswith("HTTP/"):
+                try:
+                    parts = status_line.split(" ", 2)
+                    if len(parts) >= 2:
+                        llm_status_code = int(parts[1])
+                except (ValueError, IndexError):
+                    app_logger.warning(f"Invalid status line: {status_line}")
+            for line in lines[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    llm_headers[key.strip()] = value.strip()
+
+        response.set_status(llm_status_code)
+        for k, v in llm_headers.items():
+            # Let aiohttp manage chunking and content length.
+            # The LLM may incorrectly provide these headers.
+            if k.lower() not in ("content-length", "transfer-encoding"):
+                response.headers[k] = v
+        await response.prepare(request)
+
+        app_logger.debug(
+            f"[{self.client_address_str}] Parsed HTTP response headers from LLM",
+            extra={
+                "status_code": llm_status_code,
+                "headers_count": len(llm_headers),
+                "content_type": llm_headers.get("Content-Type", "unknown"),
+                "body_preview": body_part[:100]
+                + ("..." if len(body_part) > 100 else "")
+                if body_part
+                else "none",
+            },
+        )
+        app_logger.info(
+            f"[{self.client_address_str}] Parsed HTTP headers from LLM, streaming response."
+        )
+
+        if body_part:
+            await response.write(body_part.encode("utf-8"))
+
     async def _process_content_chunk(
         self, chunk: str, response: web.StreamResponse, request: web.Request
     ):
@@ -269,48 +337,6 @@ class LLMResponseStreamer:
 
         if separator:
             header_section, body_part = self.body_buffer.split(separator, 1)
-            self.headers_and_status_parsed = True
-
-            lines = header_section.split("\n")
-            llm_status_code = 200
-            llm_headers = {}
-            if lines:
-                status_line = lines[0].strip()
-                if status_line.startswith("HTTP/"):
-                    try:
-                        parts = status_line.split(" ", 2)
-                        if len(parts) >= 2:
-                            llm_status_code = int(parts[1])
-                    except (ValueError, IndexError):
-                        app_logger.warning(f"Invalid status line: {status_line}")
-                for line in lines[1:]:
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        llm_headers[key.strip()] = value.strip()
-
-            response.set_status(llm_status_code)
-            for k, v in llm_headers.items():
-                # Let aiohttp manage chunking and content length.
-                # The LLM may incorrectly provide these headers.
-                if k.lower() not in ("content-length", "transfer-encoding"):
-                    response.headers[k] = v
-            await response.prepare(request)
-
-            app_logger.debug(
-                f"[{self.client_address_str}] Parsed HTTP response headers from LLM",
-                extra={
-                    "status_code": llm_status_code,
-                    "headers_count": len(llm_headers),
-                    "content_type": llm_headers.get("Content-Type", "unknown"),
-                    "body_preview": body_part[:100]
-                    + ("..." if len(body_part) > 100 else "")
-                    if body_part
-                    else "none",
-                },
+            await self._parse_and_prepare_response(
+                header_section, body_part, response, request
             )
-            app_logger.info(
-                f"[{self.client_address_str}] Parsed HTTP headers from LLM, streaming response."
-            )
-
-            if body_part:
-                await response.write(body_part.encode("utf-8"))

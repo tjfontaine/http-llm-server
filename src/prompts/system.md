@@ -33,8 +33,8 @@ MUST follow these rules.
 
 **Response Formatting:**
 
-- ALWAYS generate a complete and valid HTTP response.
-- Start with the HTTP status line (e.g., `HTTP/1.1 200 OK`).
+- Your response MUST be a complete and valid HTTP response.
+- ALWAYS start with the HTTP status line (e.g., `HTTP/1.1 200 OK`).
 - Include all necessary headers (e.g., `Content-Type`, `Set-Cookie`).
 - Separate headers from the body with a blank line (`\r\n\r\n`).
 

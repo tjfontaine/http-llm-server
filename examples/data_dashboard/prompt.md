@@ -20,14 +20,131 @@ version: "2.8"
 
 # Global Power Plant Dashboard (SPA)
 
-🚨 **MANDATORY FIRST ACTION** 🚨
+🚨 **CRITICAL RULE: DO NOT READ THE DATABASE FILE DIRECTLY** 🚨
 
-Upon initialization, the application must ensure the local database file exists
-and is valid. It should check for the presence of the database file in the
-`data` directory. If the file is missing or empty, the application must create
-the directory if it doesn't exist, and then download the file from
-`https://datasette.io/global-power-plants.db`. No other actions should be taken
-until the database is successfully downloaded and verified.
+The database file at `{{WEB_APP_DIR}}/data/global-power-plants.db` is a binary
+SQLite file. You **MUST NOT** under any circumstances use the `read_file` tool
+to access it. Doing so will result in a critical error.
+
+- To check if the file exists, use the `filesystem` MCP server's `get_file_info`
+  tool.
+- To interact with the database contents, use the `database` MCP server's
+  `read_query` tool.
+
+---
+
+## Routing and Initialization
+
+The application follows a specific initialization workflow to ensure the
+database is ready before serving content.
+
+### The `/_prewarm` Endpoint
+
+This endpoint is responsible for all one-time application setup.
+
+**When a request is received for `GET /_prewarm`:**
+
+1.  **Check Initialization State**: Use the `get_global_state` tool to check if
+    the `db_initialized` key is `true`. If it is, you MUST immediately respond
+    with a `302 Found` redirect to `/`. For example:
+    ```http
+    HTTP/1.1 302 Found
+    Location: /
+
+    ```
+2.  **Ensure Database Exists**: Use the `filesystem` MCP server's
+    `get_file_info` tool to determine if
+    `{{WEB_APP_DIR}}/data/global-power-plants.db` exists. **DO NOT use
+    `read_file`**.
+3.  **Validate Database Integrity**: If the file exists, use the `database` MCP
+    server to verify:
+    - The database can be opened without errors.
+    - It contains the `global-power-plants` table.
+    - The table has data (is not empty).
+4.  **Download if Needed**: If the file does not exist, is corrupted, or
+    validation fails:
+    - Use the `download_file` tool to fetch it from
+      `https://datasette.io/global-power-plants.db` and save it to
+      `{{WEB_APP_DIR}}/data/global-power-plants.db`. This tool will create the
+      directory if needed.
+    - Re-validate the downloaded database to ensure it's correct.
+5.  **Set State and Redirect**: Once the database is successfully validated, use
+    the `set_global_state` tool to set the key `db_initialized` to the string
+    `"true"`. After setting the state, you MUST respond with a `302 Found`
+    redirect, setting the `Location` header to `/`. For example:
+    ```http
+    HTTP/1.1 302 Found
+    Location: /
+
+    ```
+6.  **Handle Failure**: If the database cannot be validated even after
+    downloading, you MUST respond with a `500 Internal Server Error` and a plain
+    text message indicating the failure. For example:
+    ```http
+    HTTP/1.1 500 Internal Server Error
+    Content-Type: text/plain
+
+    Failed to initialize the database.
+    ```
+
+### All Other Routes (e.g., `/`, `/dashboard`, `/api/query`)
+
+**Before processing any other request:**
+
+1.  **Check Initialization State**: Use the `get_global_state` tool to check if
+    the `db_initialized` key is set to `"true"`.
+2.  **Serve Landing Page if Not Initialized**: If `db_initialized` is not
+    `"true"`, you MUST respond with a `200 OK` status and the following HTML
+    content. **DO NOT PROCEED WITH ANY OTHER ACTIONS.**
+    ```html
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Application Not Ready</title>
+        <style>
+          body {
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+          }
+          .container {
+            text-align: center;
+            padding: 2rem;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+          }
+          a {
+            color: #007bff;
+            text-decoration: none;
+          }
+          a:hover {
+            text-decoration: underline;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Application Initializing</h1>
+          <p>
+            The application is not yet ready. Please initialize it by visiting
+            the prewarm URL.
+          </p>
+          <p><a href="/_prewarm">Click here to initialize</a></p>
+        </div>
+      </body>
+    </html>
+    ```
+3.  **Proceed if Initialized**: If `db_initialized` is `"true"`, proceed with
+    handling the request as described in the sections below (Application
+    Architecture, Detailed View Specifications, etc.).
 
 ---
 
@@ -93,10 +210,10 @@ store's fetch function.
 This view serves as the application's main landing page, presenting a high-level
 overview of the dataset. It should display several "Key Performance Indicator"
 (KPI) cards showing metrics like the total number of power plants, the combined
-total capacity, the number of countries represented, and the most common primary
-fuel type. Below the KPIs, this view should feature a bar chart visualizing the
-top 5 countries by total power capacity. The view should fetch this data upon
-its initial load.
+total capacity, the number of countries represented (using the `country_long`
+column), and the most common primary fuel type. Below the KPIs, this view should
+feature a bar chart visualizing the top 5 countries by total power capacity. The
+view should fetch this data upon its initial load.
 
 ### Analytics View (`/analytics`)
 
@@ -117,12 +234,12 @@ the user to reload its data on demand.
 
 This view presents the raw data in a searchable, filterable, and paginated
 table. It must provide users with the ability to perform a case-insensitive text
-search on plant names and countries, as well as filter the data by country and
-primary fuel type using dropdown menus. The table should display key details for
-each plant and include pagination controls (Previous/Next buttons, page number
-display) to navigate through large result sets. This view must also include an
-"Export as CSV" button that allows users to download the currently filtered set
-of data.
+search on plant names and countries (using the `country_long` column), as well
+as filter the data by country and primary fuel type using dropdown menus. The
+table should display key details for each plant and include pagination controls
+(Previous/Next buttons, page number display) to navigate through large result
+sets. This view must also include an "Export as CSV" button that allows users to
+download the currently filtered set of data.
 
 ### Market Research View (`/market-research`)
 
@@ -169,7 +286,14 @@ JSON response that mirrors the structure of the original query.
 
 **IMPORTANT**: The table in the database is named `global-power-plants`. All SQL
 queries MUST use this exact table name, enclosed in double quotes (e.g.,
-`SELECT * FROM "global-power-plants";`) because of the hyphen in the name.
+`SELECT * FROM "global-power-plants";`) because of the hyphen in the name. The
+column for country names is `country_long`.
+
+**DATABASE FILE LOCATION**: All file operations must use the `{{WEB_APP_DIR}}`
+placeholder which will be replaced with the actual web application directory
+path. The database file should be located at
+`{{WEB_APP_DIR}}/data/global-power-plants.db`. When using the `download_file`
+tool, ensure you download to this exact path.
 
 ## Styling and UX
 
