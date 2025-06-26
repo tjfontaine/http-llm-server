@@ -34,6 +34,7 @@ class Config(BaseModel):
     one_shot: bool = Field(False, env="ONE_SHOT")
     local_tools_stdio: bool = Field(False, env="LOCAL_TOOLS_STDIO")
     log_level: str = Field("INFO", env="LOG_LEVEL")
+    debug: bool = Field(False, env="DEBUG")
     mcp_servers: List[MCPConfig] = Field(default_factory=list, env="MCP_SERVERS")
     webapp_metadata: Dict[str, Any] = Field(default_factory=dict)
     system_prompt_template: Optional[str] = None

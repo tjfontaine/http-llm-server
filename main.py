@@ -157,6 +157,12 @@ def initialize_configuration():
         in ("true", "1", "yes"),
         help="Enable or disable the in-process local tools server.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=str(get_env("DEBUG", "false")).lower() in ("true", "1", "yes"),
+        help="Enable debug mode, which injects a debug panel into HTML responses.",
+    )
 
     # One-shot mode for round-trip evaluation
     parser.add_argument(
@@ -205,6 +211,7 @@ def initialize_configuration():
         else int(get_env("CONTEXT_WINDOW_MAX", DEFAULT_CONTEXT_WINDOW_MAX))
     )
     config["LOCAL_TOOLS_ENABLED"] = args.local_tools
+    config["DEBUG"] = args.debug
 
     # Store one-shot flag
     config["ONE_SHOT"] = args.one_shot
@@ -384,6 +391,7 @@ def initialize_configuration():
         system_prompt_template=config["SYSTEM_PROMPT_TEMPLATE"],
         error_llm_system_prompt_template=config["ERROR_LLM_SYSTEM_PROMPT_TEMPLATE"],
         web_app_rules=config["WEB_APP_RULES"],
+        debug=config["DEBUG"],
     )
     return pydantic_cfg
 

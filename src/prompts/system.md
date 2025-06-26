@@ -31,6 +31,8 @@ MUST follow these rules.
 
 <web_application_rules> {{ web_app_rules }} </web_application_rules>
 
+{{ debug_panel_prompt }}
+
 **Response Formatting:**
 
 - Your response MUST be a complete and valid HTTP response.

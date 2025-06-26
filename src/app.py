@@ -110,15 +110,25 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             )
             rendered_rules = config.web_app_rules
 
+    # Prepare the debug panel prompt if debug mode is enabled
+    debug_panel_prompt = ""
+    if config.debug:
+        debug_panel_prompt = request.app.get("debug_panel_prompt", "")
+        app_logger.info(
+            f"[{client_address_str}] Debug mode is active. Injecting debug panel prompt."
+        )
+
     jinja_context = {
         "session_id": session_id_from_cookie or "",
-        "global_state": json.dumps(global_state),
+        "global_state": json.dumps(global_state, indent=2),
         "current_token_count": str(current_token_count),
         "context_window_max": str(context_window_max),
         "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),
         "dynamic_server_name_example": "LLMWebServer/0.1",
         "WEB_APP_DIR": web_app_dir,
         "web_app_rules": rendered_rules,
+        "debug_panel_prompt": debug_panel_prompt,
+        "history_json": json.dumps(history, indent=2),
     }
 
     # Render system prompt
@@ -268,12 +278,28 @@ def create_app(config: Config) -> web.Application:
     app["session_store"] = HttpConversationStore(save_to_disk=config.save_conversations)
     app["error_llm_system_prompt_template"] = config.error_llm_system_prompt_template
 
+    # Load and store the debug panel prompt if debug mode is enabled
+    if config.debug:
+        try:
+            with open("src/prompts/debug.md", "r", encoding="utf-8") as f:
+                app["debug_panel_prompt"] = f.read()
+            app_logger.info("Successfully loaded debug panel prompt for debug mode.")
+        except FileNotFoundError:
+            app_logger.error(
+                "Could not find 'src/prompts/debug.md'. Debug panel will not be available."
+            )
+            app["debug_panel_prompt"] = ""
+        except Exception as e:
+            app_logger.error(f"Error reading 'src/prompts/debug.md': {e}")
+            app["debug_panel_prompt"] = ""
+
     app.router.add_route("*", "/{path:.*}", handle_http_request)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
     return app
+
 
 
 def run_local_tools_stdio_server():
