@@ -213,7 +213,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "LLM did not produce a valid HTTP response.",
         )
     else:
-        await response.write_eof()
         app_logger.info(
             f"[{client_address_str}] Successfully streamed full LLM response."
         )
