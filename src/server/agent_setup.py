@@ -156,6 +156,7 @@ async def initialize_mcp_servers_and_agent(config: Config, app: web.Application)
         model_settings=ModelSettings(
             temperature=config.openai_temperature,
             include_usage=True,
+            reasoning={'max_tokens': config.openai_reasoning_max_tokens} if config.openai_reasoning_max_tokens is not None else None,
         ),
         mcp_servers=mcp_servers,
     )

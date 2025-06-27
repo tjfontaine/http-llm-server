@@ -187,6 +187,12 @@ def initialize_configuration():
         default=get_env("LOG_LEVEL", "INFO").upper(),
         help="Set the logging level for the application and all dependencies. TRACE enables DEBUG for all dependencies (default: INFO, or from LOG_LEVEL env var)",
     )
+    parser.add_argument(
+        "--openai-reasoning-max-tokens",
+        type=int,
+        default=None,
+        help="Maximum number of tokens for reasoning (OpenRouter/Gemini specific) (default: None, or from OPENAI_REASONING_MAX_TOKENS env var)",
+    )
 
     # Now parse all arguments for real
     args = parser.parse_args()
@@ -217,6 +223,7 @@ def initialize_configuration():
     config["ONE_SHOT"] = args.one_shot
     config["LOCAL_TOOLS_STDIO"] = args.local_tools_stdio
     config["LOG_LEVEL"] = args.log_level
+    config["OPENAI_REASONING_MAX_TOKENS"] = args.openai_reasoning_max_tokens
 
     if not config["API_KEY"]:
         app_logger.error(
@@ -392,6 +399,8 @@ def initialize_configuration():
         error_llm_system_prompt_template=config["ERROR_LLM_SYSTEM_PROMPT_TEMPLATE"],
         web_app_rules=config["WEB_APP_RULES"],
         debug=config["DEBUG"],
+        openai_max_tokens=None,
+        openai_reasoning_max_tokens=config["OPENAI_REASONING_MAX_TOKENS"],
     )
     return pydantic_cfg
 
