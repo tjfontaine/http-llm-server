@@ -25,7 +25,7 @@ async def main():
     mcp_client = MCPServerStdio(
         params={
             "command": sys.executable,
-            "args": ["src/server/core_services.py"],
+            "args": ["-m", "src.server.core_services"],
             "process_name": "core-services",
         }
     )

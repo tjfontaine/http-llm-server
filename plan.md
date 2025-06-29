@@ -91,7 +91,7 @@ new architecture.
 
 ---
 
-### [ ] Step 2: Implement `core-services` Tools for Resource Management
+### [X] Step 2: Implement `core-services` Tools for Resource Management
 
 **Goal:** Populate the `core-services` MCP server with the granular tools needed
 to configure and manage the `WebServer` resource.
@@ -105,14 +105,14 @@ perfectly on its own.
 
 **Tasks:**
 
-- [ ] **Implement Utility Tools** in `src/server/core_services.py`:
+- [x] **Implement Utility Tools** in `src/server/core_services.py`:
       `get_config`, `read_file`, `render_template`, `parse_webapp_file`.
-- [ ] **Implement Resource Management Tools** in `src/server/core_services.py`:
+- [x] **Implement Resource Management Tools** in `src/server/core_services.py`:
       `create_web_resource`, `update_web_resource_config`, `connect_mcp_server`,
       `start_web_server`, `destroy_web_resource`.
-- [ ] **Flesh out `src/server/web_resource.py`**: Encapsulate `aiohttp` logic
+- [x] **Flesh out `src/server/web_resource.py`**: Encapsulate `aiohttp` logic
       and lifecycle methods (`start`, `stop`, `cleanup`).
-- [ ] **Strip down `src/app.py`**: Leave only the `handle_http_request`
+- [x] **Strip down `src/app.py`**: Leave only the `handle_http_request`
       function.
 
 **Test Plan:**
