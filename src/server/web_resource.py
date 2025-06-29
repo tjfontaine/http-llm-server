@@ -32,10 +32,17 @@ app_logger, _, _ = get_loggers()
 class WebServer:
     """A wrapper for the aiohttp web server."""
 
-    def __init__(self, port: int, host: str, mcp_servers_config: list = []):
+    def __init__(
+        self,
+        port: int,
+        host: str,
+        mcp_servers_config: list = [],
+        core_services_server_obj=None,
+    ):
         self.port = port
         self.host = host
         self.mcp_servers_config = mcp_servers_config
+        self.core_services_server_obj = core_services_server_obj
         self.app = web.Application(
             middlewares=[
                 logging_and_metrics_middleware(),
@@ -61,6 +68,11 @@ class WebServer:
         """
         app_logger.debug("Starting MCP servers initialization")
         mcp_servers = []
+
+        # Add the core services server object if it was provided
+        if self.core_services_server_obj:
+            app_logger.debug("Adding core_services tools to the agent.")
+            mcp_servers.append(self.core_services_server_obj)
 
         # Initialize external MCP servers from typed config
         if self.mcp_servers_config:

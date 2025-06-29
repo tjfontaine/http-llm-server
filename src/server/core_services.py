@@ -100,7 +100,10 @@ async def create_web_resource(
         logger.debug(f"Generated resource ID: {resource_id}")
 
         server_instance = WebServer(
-            port=port, host=host, mcp_servers_config=mcp_servers
+            port=port,
+            host=host,
+            mcp_servers_config=mcp_servers,
+            core_services_server_obj=core_services,
         )
 
         # Store with metadata for better tracking

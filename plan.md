@@ -207,62 +207,61 @@ understand.
 ### [ ] Step 5: Restore Dynamic and Local Tooling
 
 **Goal:** Restore the critical ability for the web application's agent to use
-both the original "local tools" (for state management) and any external tools
-defined in the `WEB_APP_FILE`.
+tools from three key sources: the `core-services` server, the separate
+`local-tools` server for state management, and any external tools defined in the
+`WEB_APP_FILE`.
 
 **Why This Step Matters:** The initial refactoring achieved architectural purity
 but resulted in a net loss of functionality. The agent handling user requests is
 currently isolated, unable to connect to other tool servers or manage state.
-This step restores that core capability, making the agent powerful again.
+This step restores that core capability by properly wiring the agent to all its
+necessary tool sources.
 
 **Tasks:**
 
-- [ ] **Migrate Local Tools into Core Services**: - Re-implement the tools from
-      the old `src/local_tools.py` directly within
-      `src/server/core_services.py`. This includes: `download_file`,
-      `create_session`, `assign_session_id`, `get/set_global_state`, and the
-      full `*session_data` suite. - These tools will use state dictionaries
-      (`global_state`, `mcp_session_store`) held in memory within the
-      `core_services` process.
+- [ ] **Utilize Separate `local_tools.py` Server**: - The state-management tools
+      (`create_session`, `get/set_global_state`, `*session_data`, etc.) will
+      remain in their own `src/server/local_tools.py` MCP server. - This
+      maintains modularity, keeping stateful logic separate from the core
+      orchestration services.
 
-- [ ] **Make `setup_web_app` Configuration-Aware**: - Modify the `setup_web_app`
-      tool in `core_services.py`. - It must now read the `config.web_app_file`
-      path. - It must call the `parse_webapp_file` tool to extract the YAML
-      metadata, specifically looking for the `mcp_servers` list. - This
-      extracted configuration must be passed to the `WebServer` resource when it
-      is being configured.
+- [ ] **Make `setup_web_app` Configuration-Aware**: - The `setup_web_app` tool
+      in `core_services.py` must be able to dynamically configure the
+      `WebServer` resource. - It will parse the `WEB_APP_FILE` to extract the
+      `mcp_servers` list. - It will also conditionally add the `local_tools`
+      server to the MCP configuration if `enable_local_tools` is true.
 
-- [ ] **Empower the `WebServer` Resource**: - In `src/server/web_resource.py`,
-      the `WebServer` class must be enhanced to create and manage its own
-      `Agent` instance. - Add a new method, like
-      `initialize_agent(self, mcp_servers_config: list, core_services_tools: list)`. -
-      This method will contain the logic from the old `agent_setup.py`: - It
-      will instantiate the `Agent` for handling HTTP requests. - It will loop
-      through the `mcp_servers_config`, create the appropriate `agents.mcp`
-      clients, and connect to them. - It will add both the newly connected
-      external tools and the built-in `core_services` tools to its agent. - The
-      `start` method of the `WebServer` will call `initialize_agent` before
-      launching the `aiohttp` server.
+- [ ] **Empower the `WebServer` Resource**: - In `src/server/core_services.py`,
+      the `create_web_resource` tool must be updated to pass a direct reference
+      to the `core_services` server object itself when creating a `WebServer`
+      instance. - In `src/server/web_resource.py`, the `WebServer` class must be
+      updated to accept this server object. - The `WebServer.initialize_agent`
+      method will then be responsible for creating the agent with a list of MCP
+      servers that includes: 1. The `core-services` server object. 2. The client
+      connections to servers from the `mcp_servers_config` (which now includes
+      `local-tools` and any others from the web app file).
 
 **Test Plan:**
 
 1.  Create a test `prompt.md` with an `mcp_servers` entry pointing to a simple
-    external tool server (can be faked with a simple script).
-2.  The prompt instructions should tell the agent to call a tool on that
-    external server.
-3.  The prompt should also instruct the agent to use one of the newly migrated
-    local tools, like `set_global_state` and then `get_global_state`.
+    external tool server and set `enable_local_tools: true` in the orchestrator
+    prompt.
+2.  The prompt instructions for the web app should tell its agent to call a tool
+    on the external server.
+3.  The prompt should also instruct the agent to use both a `local-tools` tool
+    (e.g., `set_session_data`) and a `core-services` tool (e.g., `read_file`).
 4.  Run the application.
 5.  **Verification**: The logs should show the `WebServer`'s agent successfully
-    calling both the external tool and the internal `core-services` tool,
-    proving that dynamic tooling has been restored.
+    calling tools on all three sources (external, local-tools, and
+    core-services), proving that dynamic, multi-source tooling has been
+    restored.
 
 **Git Commit Message:**
 `feat(agent): Restore dynamic and local tooling to web server agent`
 
 ---
 
-### [ ] Step 6: Restore True End-to-End One-Shot Testing
+### [X] Step 6: Restore True End-to-End One-Shot Testing
 
 **Goal:** Reinstate the original, more valuable behavior of the `--one-shot`
 flag to perform a full, end-to-end HTTP request/response test.
