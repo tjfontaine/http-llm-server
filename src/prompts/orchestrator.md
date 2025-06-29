@@ -1,1 +1,1 @@
-Call the 'setup_web_app' tool.
+Call the `setup_web_app` tool.
