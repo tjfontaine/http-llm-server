@@ -4,6 +4,7 @@ import jinja2
 import yaml
 import re
 import uuid
+from aiohttp import web
 
 from mcp.server.fastmcp.server import FastMCP as Server, Context
 from mcp.types import Tool, TextContent
@@ -12,6 +13,10 @@ from src.server.web_resource import WebServer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+async def simple_request_handler(request: web.Request) -> web.Response:
+    """A simple request handler for testing."""
+    return web.Response(text="Hello, world!")
 
 # In-memory store for our web server resources
 web_servers: dict[str, WebServer] = {}
@@ -67,9 +72,7 @@ async def update_web_resource_config(context: Context, resource_id: str) -> Text
         raise ValueError(f"Web server resource with ID '{resource_id}' not found.")
 
     # For now, we'll just add a default route to simulate a config update.
-    # We will import the request handler from app.py
-    from src.app import handle_http_request
-    server_instance.add_route("/{path:.*}", handle_http_request)
+    server_instance.add_route("/{path:.*}", simple_request_handler)
     
     return TextContent(type="text", text=f"Web server {resource_id} configuration updated.")
 
@@ -151,6 +154,39 @@ async def read_file(context: Context, path: str) -> TextContent:
         raise
     except Exception:
         raise
+
+
+@server.tool()
+async def setup_web_app(context: Context) -> TextContent:
+    """
+    Sets up the entire web application by orchestrating calls to other tools.
+    This is a high-level tool that abstracts the setup process.
+    """
+    logger.info("Starting high-level web app setup...")
+
+    try:
+        # 1. Create the web resource
+        port = config.port
+        resource_id_content = await create_web_resource(context, port=port)
+        resource_id = resource_id_content.text
+        logger.info(f"  - Step 1: Web resource created with ID: {resource_id}")
+
+        # 2. Update the configuration (e.g., add routes)
+        await update_web_resource_config(context, resource_id=resource_id)
+        logger.info(f"  - Step 2: Web resource '{resource_id}' configured.")
+
+        # 3. Start the server
+        await start_web_server(context, resource_id=resource_id)
+        logger.info(f"  - Step 3: Web server '{resource_id}' started.")
+
+        final_message = f"Successfully set up web app. Server is running on port {port} with resource ID {resource_id}."
+        logger.info(final_message)
+        return TextContent(type="text", text=final_message)
+
+    except Exception as e:
+        error_message = f"Error during web app setup: {e}"
+        logger.error(error_message, exc_info=True)
+        raise ValueError(error_message)
 
 
 def main():

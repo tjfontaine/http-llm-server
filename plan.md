@@ -134,7 +134,7 @@ perfectly on its own.
 
 ---
 
-### [ ] Step 3: Create a High-Level `setup_web_app` Tool
+### [X] Step 3: Create a High-Level `setup_web_app` Tool
 
 **Goal:** Abstract the entire multi-step setup process into a single, high-level
 tool, moving orchestration logic from the agent's prompt to the server.
@@ -147,9 +147,9 @@ testable Python code on the server.
 
 **Tasks:**
 
-- [ ] In `src/server/core_services.py`, create a new tool:
+- [x] In `src/server/core_services.py`, create a new tool:
       `async def setup_web_app(context: Context)`.
-- [ ] Inside this function, implement the orchestration logic that is currently
+- [x] Inside this function, implement the orchestration logic that is currently
       in the agent's prompt. It will call the other `core-services` tools
       _internally_ to perform the full setup sequence.
 
