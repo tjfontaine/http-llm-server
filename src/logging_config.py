@@ -59,78 +59,64 @@ class EnhancedStructuredFormatter(logging.Formatter):
 
 def configure_logging(log_level: str = "INFO"):
     """Configure all loggers with the specified log level and consistent formatting."""
-    # Handle special TRACE level
-    if log_level.upper() == "TRACE":
-        # TRACE means DEBUG for our app, but also DEBUG for all dependencies
+    log_level_upper = log_level.upper()
+
+    # 1. Determine log levels for app and dependencies
+    if log_level_upper == "TRACE":
         app_log_level = logging.DEBUG
         deps_log_level = logging.DEBUG
         actual_level_name = "TRACE"
+    elif log_level_upper == "DEBUG":
+        app_log_level = logging.DEBUG
+        deps_log_level = logging.INFO
+        actual_level_name = "DEBUG"
+    elif log_level_upper == "INFO":
+        app_log_level = logging.INFO
+        deps_log_level = logging.WARNING  # Default for deps is WARNING
+        actual_level_name = "INFO"
     else:
-        # Convert string log level to logging constant
-        app_log_level = getattr(logging, log_level.upper(), logging.INFO)
-        deps_log_level = None  # Will be set conditionally below
-        actual_level_name = log_level.upper()
+        app_log_level = getattr(logging, log_level_upper, logging.INFO)
+        deps_log_level = logging.WARNING
+        actual_level_name = log_level_upper
 
-    # Configure root logger to control all dependencies
+    # 2. Clear all handlers and reset propagation to default
     root_logger = logging.getLogger()
-    root_logger.setLevel(app_log_level)
+    for name in logging.root.manager.loggerDict:
+        logger = logging.getLogger(name)
+        if isinstance(logger, logging.Logger):
+            logger.handlers.clear()
+            logger.propagate = True
+    root_logger.handlers.clear()
 
-    # Get our application loggers
-    app_logger, access_logger, conversation_logger = get_loggers()
-
-    # Clear existing handlers
-    for logger_instance in [
-        root_logger,
-        app_logger,
-        access_logger,
-        conversation_logger,
-    ]:
-        if logger_instance.hasHandlers():
-            logger_instance.handlers.clear()
-
-    # Create enhanced handler with Rich for better console output
+    # 3. Configure the root logger
+    # The root logger must be set to the most verbose level of all loggers.
+    root_logger.setLevel(min(app_log_level, deps_log_level))
     rich_handler = RichHandler(
-        rich_tracebacks=True,
-        show_path=False,
-        show_time=False,  # We include timestamp in our custom formatter
-        markup=True,
-        level=app_log_level,
+        rich_tracebacks=True, show_path=False, show_time=False, markup=True
     )
     rich_handler.setFormatter(EnhancedStructuredFormatter())
-
-    # Configure root logger (affects all dependencies)
     root_logger.addHandler(rich_handler)
-    root_logger.setLevel(app_log_level)
 
-    # Configure our application loggers
+    # 4. Set levels for our application-specific loggers
+    # They will propagate to the root handler.
+    app_logger, access_logger, conversation_logger = get_loggers()
     for logger_instance in [app_logger, access_logger, conversation_logger]:
         logger_instance.setLevel(app_log_level)
-        logger_instance.propagate = True  # Let them propagate to root logger
 
-    # Configure specific noisy libraries
-    if deps_log_level == logging.DEBUG:
-        # TRACE mode - show everything from dependencies
-        logging.getLogger("urllib3").setLevel(logging.DEBUG)
-        logging.getLogger("httpcore").setLevel(logging.DEBUG)
-        logging.getLogger("httpx").setLevel(logging.DEBUG)
-        logging.getLogger("aiohttp").setLevel(logging.DEBUG)
-        logging.getLogger("openai").setLevel(logging.DEBUG)
-        logging.getLogger("agents").setLevel(logging.DEBUG)
-    else:
-        # Normal mode (including DEBUG) - suppress noisy dependencies
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("aiohttp").setLevel(logging.WARNING)
-        logging.getLogger("openai").setLevel(logging.WARNING)
-        logging.getLogger("agents").setLevel(
-            logging.INFO
-        )  # Keep agents library at INFO
+    # 5. Set specific log levels for noisy third-party libraries
+    # This overrides the root logger's level for these specific logger hierarchies.
+    noisy_deps = ["urllib3", "httpcore", "httpx", "aiohttp", "openai", "agents", "mcp"]
+    for dep_name in noisy_deps:
+        logging.getLogger(dep_name).setLevel(deps_log_level)
 
+    # Get the main app logger for status messages
     app_logger.info(
-        f"Logging configured at {actual_level_name} level for all components"
+        f"Logging configured. App level: {logging.getLevelName(app_log_level)}, "
+        f"Dependency level: {logging.getLevelName(deps_log_level)}"
     )
     if actual_level_name == "TRACE":
-        app_logger.info("TRACE mode enabled - showing DEBUG level for all dependencies")
+        app_logger.info("TRACE mode: All dependencies are at DEBUG level.")
+    elif actual_level_name == "DEBUG":
+        app_logger.info("DEBUG mode: Application logs at DEBUG, dependencies at INFO.")
 
     return app_logger, access_logger, conversation_logger

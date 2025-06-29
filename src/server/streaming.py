@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 from agents.items import ToolCallItem
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
 from openai.types.responses import ResponseFunctionToolCall
 
 from ..logging_config import get_loggers
@@ -97,27 +98,6 @@ class LLMResponseStreamer:
                         f"[{self.client_address_str}] Stream event: {event.name}",
                         extra={"event_type": type(event.item).__name__},
                     )
-                elif event.name in [
-                    "message_chunk_created"
-                ] and app_logger.isEnabledFor(logging.DEBUG):
-                    # For message chunks, show content preview at DEBUG level
-                    chunk_preview = ""
-                    if hasattr(event.item, "chunk") and hasattr(
-                        event.item.chunk, "text"
-                    ):
-                        chunk_preview = event.item.chunk.text[:50] + (
-                            "..." if len(event.item.chunk.text) > 50 else ""
-                        )
-                    app_logger.debug(
-                        f"[{self.client_address_str}] Received text chunk",
-                        extra={
-                            "content_preview": chunk_preview,
-                            "chunk_length": len(event.item.chunk.text)
-                            if hasattr(event.item, "chunk")
-                            and hasattr(event.item.chunk, "text")
-                            else 0,
-                        },
-                    )
 
                 if event.name == "tool_called":
                     final_session_id_for_turn = await self._handle_tool_call(
@@ -133,13 +113,12 @@ class LLMResponseStreamer:
                         await self._process_content_chunk(chunk, response, request)
 
             else:
-                # For RawResponsesStreamEvent and other events, only log if they contain useful info
+                # For RawResponsesStreamEvent, extract useful information
                 if isinstance(
                     event, RawResponsesStreamEvent
                 ) and app_logger.isEnabledFor(logging.DEBUG):
-                    # Extract useful information from raw response events
+                    # Look for finish reason, usage info, etc.
                     if hasattr(event, "item") and hasattr(event.item, "raw_item"):
-                        # Look for finish reason, usage info, etc.
                         raw_item = event.item.raw_item
                         debug_info = {}
                         if (
@@ -154,30 +133,44 @@ class LLMResponseStreamer:
 
                         if debug_info:  # Only log if we have useful info
                             app_logger.debug(
-                                f"[{self.client_address_str}] Raw response event with metadata",
+                                f"[{self.client_address_str}] Stream metadata",
                                 extra=debug_info,
                             )
-                elif not isinstance(event, RawResponsesStreamEvent):
-                    # Log other event types that might be interesting
-                    app_logger.debug(
-                        f"[{self.client_address_str}] Stream event",
-                        extra={"event_type": type(event).__name__},
-                    )
 
         self.llm_stream_end_time = time.perf_counter()
+
+        # Log final state for debugging
+        app_logger.debug(
+            f"[{self.client_address_str}] LLM stream ended",
+            extra={
+                "headers_parsed": self.headers_and_status_parsed,
+                "buffer_length": len(self.body_buffer),
+                "response_length": len(self.llm_response_fully_collected_text_for_log),
+            },
+        )
+
+        if not self.headers_and_status_parsed:
+            app_logger.warning(
+                f"[{self.client_address_str}] Stream ended without parsing headers. "
+                f"Response preview: '{self.llm_response_fully_collected_text_for_log[:200]}{'...' if len(self.llm_response_fully_collected_text_for_log) > 200 else ''}'"
+            )
 
         # If the stream ends and we have a buffer that looks like a response
         # but without the final separator, we process it as a headers-only response.
         if not self.headers_and_status_parsed and self.body_buffer.strip().startswith(
             "HTTP/"
         ):
-            app_logger.info(
-                f"[{self.client_address_str}] Stream ended with unparsed headers. "
-                "Attempting to parse as headers-only response."
+            app_logger.debug(
+                f"[{self.client_address_str}] Attempting to parse unparsed headers as headers-only response"
             )
             # Treat the whole buffer as headers, with an empty body
             await self._parse_and_prepare_response(
                 self.body_buffer, "", response, request
+            )
+        elif not self.headers_and_status_parsed:
+            app_logger.error(
+                f"[{self.client_address_str}] Stream ended without valid HTTP headers. "
+                f"Buffer content: '{self.body_buffer[:500]}{'...' if len(self.body_buffer) > 500 else ''}'"
             )
 
         # Prepare metrics dictionary
@@ -293,26 +286,29 @@ class LLMResponseStreamer:
             # The LLM may incorrectly provide these headers.
             if k.lower() not in ("content-length", "transfer-encoding"):
                 response.headers[k] = v
-        await response.prepare(request)
+        try:
+            await response.prepare(request)
+        except (ClientConnectionResetError, ConnectionResetError):
+            app_logger.warning(
+                f"[{self.client_address_str}] Client disconnected before headers could be sent."
+            )
+            return
 
         app_logger.debug(
-            f"[{self.client_address_str}] Parsed HTTP response headers from LLM",
+            f"[{self.client_address_str}] Parsed HTTP headers from LLM",
             extra={
                 "status_code": llm_status_code,
-                "headers_count": len(llm_headers),
                 "content_type": llm_headers.get("Content-Type", "unknown"),
-                "body_preview": body_part[:100]
-                + ("..." if len(body_part) > 100 else "")
-                if body_part
-                else "none",
             },
-        )
-        app_logger.info(
-            f"[{self.client_address_str}] Parsed HTTP headers from LLM, streaming response."
         )
 
         if body_part:
-            await response.write(body_part.encode("utf-8"))
+            try:
+                await response.write(body_part.encode("utf-8"))
+            except (ClientConnectionResetError, ConnectionResetError):
+                app_logger.warning(
+                    f"[{self.client_address_str}] Client disconnected while writing initial body part."
+                )
 
     async def _process_content_chunk(
         self, chunk: str, response: web.StreamResponse, request: web.Request
@@ -321,7 +317,12 @@ class LLMResponseStreamer:
         self.llm_response_fully_collected_text_for_log += chunk
 
         if self.headers_and_status_parsed:
-            await response.write(chunk.encode("utf-8"))
+            try:
+                await response.write(chunk.encode("utf-8"))
+            except (ClientConnectionResetError, ConnectionResetError):
+                app_logger.warning(
+                    f"[{self.client_address_str}] Client disconnected during stream."
+                )
             return
 
         self.body_buffer += chunk
@@ -337,6 +338,14 @@ class LLMResponseStreamer:
 
         if separator:
             header_section, body_part = self.body_buffer.split(separator, 1)
+            app_logger.info(
+                f"[{self.client_address_str}] Parsing HTTP headers from LLM. "
+                f"Header section: '{header_section[:200]}{'...' if len(header_section) > 200 else ''}'"
+            )
             await self._parse_and_prepare_response(
                 header_section, body_part, response, request
+            )
+        else:
+            app_logger.debug(
+                f"[{self.client_address_str}] No header separator found yet, continuing to buffer"
             )

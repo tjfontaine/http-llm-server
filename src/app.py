@@ -59,6 +59,16 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     - Pass the stream to the LLMResponseStreamer
     - Return the response
     """
+    # Handle health check immediately without LLM processing
+    if request.path == "/_health_check":
+        response = web.Response(
+            text="OK",
+            status=200,
+            content_type="text/plain",
+            headers={"Cache-Control": "no-cache"},
+        )
+        return response
+
     # Get data from middleware
     client_address_str = request["client_address_str"]
     session_id_from_cookie = request["session_id_from_cookie"]
@@ -136,13 +146,15 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     messages.append({"role": "user", "content": raw_request_text})
 
     app_logger.info(
-        f"[{client_address_str}] Handing request to LLM with session context: "
-        f"ID='{session_id_from_cookie or 'None'}', "
-        f"HistoryTurns={len(history)}, TokenCount={current_token_count}"
+        f"[{client_address_str}] Processing request: {session_id_from_cookie or 'new session'}, "
+        f"History: {len(history)} turns, Tokens: {current_token_count}"
     )
 
     # Reset agent instructions and start LLM processing
     agent.instructions = None
+    app_logger.debug(
+        f"[{client_address_str}] Agent instructions set to: {agent.instructions}"
+    )
 
     # Store timing for middleware
     llm_call_start_time = time.perf_counter()
@@ -157,7 +169,14 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "max_turns": max_turns,
         },
     )
-    app_logger.info(f"[{client_address_str}] Processing LLM request...")
+
+    # Log the system prompt and message structure at debug level
+    app_logger.debug(
+        f"[{client_address_str}] System prompt length: {len(dynamic_system_prompt)} chars"
+    )
+    app_logger.debug(
+        f"[{client_address_str}] Messages: {len(messages)} total, roles: {[msg.get('role', 'unknown') for msg in messages]}"
+    )
 
     # Run the LLM stream
     agent_stream = Runner.run_streamed(
@@ -189,8 +208,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # Validate response
     if not response.prepared:
         app_logger.warning(
-            f"[{client_address_str}] LLM stream finished without a valid HTTP response header. "
-            f"LLM Output: {metrics['llm_response_fully_collected_text_for_log']}"
+            f"[{client_address_str}] LLM stream finished without valid HTTP response headers"
         )
         return await send_llm_error_response_aiohttp(
             request,
@@ -199,8 +217,6 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "LLM did not produce a valid HTTP response.",
         )
     else:
-        app_logger.info(
-            f"[{client_address_str}] Successfully streamed full LLM response."
-        )
+        app_logger.debug(f"[{client_address_str}] Successfully streamed LLM response")
 
     return response

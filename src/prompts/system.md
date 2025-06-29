@@ -24,6 +24,22 @@ line, headers, and body.
 - When you call a tool, the server will execute it and return the result to you.
 - You can then use this result to inform your final HTTP response.
 
+**Health Check Endpoint:**
+
+- If the request path is `/_health_check`, respond immediately with a simple
+  health check response.
+- Do NOT create sessions, call tools, or perform any complex processing for
+  health checks.
+- Health check response format:
+
+  ```
+  HTTP/1.1 200 OK
+  Content-Type: text/plain
+  Cache-Control: no-cache
+
+  OK
+  ```
+
 **Web Application Rules:**
 
 The following are rules for the specific web application you are building. You
