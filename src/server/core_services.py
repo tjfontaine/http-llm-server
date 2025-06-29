@@ -9,8 +9,8 @@ from mcp.server.fastmcp.server import FastMCP as Server, Context
 from mcp.types import TextContent
 from src.config import Config
 from src.server.web_resource import WebServer
+from src.logging_config import configure_logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -204,6 +204,7 @@ async def setup_web_app(context: Context) -> TextContent:
 
 
 def main():
+    configure_logging(config.log_level)
     logger.info("Starting core-services MCP server...")
     server.run(transport="stdio")
 
