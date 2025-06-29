@@ -1,7 +1,13 @@
 import asyncio
 import sys
 
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel, set_tracing_disabled
+from agents import (
+    Agent,
+    Runner,
+    AsyncOpenAI,
+    OpenAIChatCompletionsModel,
+    set_tracing_disabled,
+)
 from agents.mcp import MCPServerStdio
 
 from src.config import Config
@@ -61,7 +67,9 @@ async def main():
         with open("src/prompts/orchestrator.md", "r", encoding="utf-8") as f:
             orchestrator_instructions = f.read()
     except FileNotFoundError:
-        app_logger.error("Could not find 'src/prompts/orchestrator.md'. Cannot proceed.")
+        app_logger.error(
+            "Could not find 'src/prompts/orchestrator.md'. Cannot proceed."
+        )
         return
 
     app_logger.info("Running orchestrator agent...")
@@ -72,7 +80,7 @@ async def main():
         if event.type == "error":
             app_logger.error(f"An error occurred: {event.error}")
             break
-    
+
     app_logger.info(f"Orchestrator Final Output: {run_result.final_output}")
 
     if not config.one_shot:

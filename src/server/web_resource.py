@@ -1,8 +1,8 @@
 from aiohttp import web
-import asyncio
 import logging
 
 app_logger = logging.getLogger(__name__)
+
 
 class WebServer:
     def __init__(self, port: int, host: str = "0.0.0.0"):
@@ -41,4 +41,4 @@ class WebServer:
 
     async def cleanup(self):
         """Ensures the server is stopped during cleanup."""
-        await self.stop() 
+        await self.stop()

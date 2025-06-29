@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import jinja2
 import yaml
@@ -7,16 +6,18 @@ import uuid
 from aiohttp import web
 
 from mcp.server.fastmcp.server import FastMCP as Server, Context
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent
 from src.config import Config
 from src.server.web_resource import WebServer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 async def simple_request_handler(request: web.Request) -> web.Response:
     """A simple request handler for testing."""
     return web.Response(text="Hello, world!")
+
 
 # In-memory store for our web server resources
 web_servers: dict[str, WebServer] = {}
@@ -32,7 +33,9 @@ server = Server(
 
 
 @server.tool()
-async def create_web_resource(context: Context, port: int, host: str = "0.0.0.0") -> TextContent:
+async def create_web_resource(
+    context: Context, port: int, host: str = "0.0.0.0"
+) -> TextContent:
     """Creates a new web server resource and returns its unique ID."""
     resource_id = str(uuid.uuid4())
     server_instance = WebServer(port=port, host=host)
@@ -47,7 +50,7 @@ async def start_web_server(context: Context, resource_id: str) -> TextContent:
     server_instance = web_servers.get(resource_id)
     if not server_instance:
         raise ValueError(f"Web server resource with ID '{resource_id}' not found.")
-    
+
     await server_instance.start()
     return TextContent(type="text", text=f"Web server {resource_id} started.")
 
@@ -58,7 +61,7 @@ async def destroy_web_resource(context: Context, resource_id: str) -> TextConten
     server_instance = web_servers.pop(resource_id, None)
     if not server_instance:
         raise ValueError(f"Web server resource with ID '{resource_id}' not found.")
-    
+
     await server_instance.stop()
     logger.info(f"Destroyed web server resource with ID: {resource_id}")
     return TextContent(type="text", text=f"Web server {resource_id} destroyed.")
@@ -73,17 +76,25 @@ async def update_web_resource_config(context: Context, resource_id: str) -> Text
 
     # For now, we'll just add a default route to simulate a config update.
     server_instance.add_route("/{path:.*}", simple_request_handler)
-    
-    return TextContent(type="text", text=f"Web server {resource_id} configuration updated.")
+
+    return TextContent(
+        type="text", text=f"Web server {resource_id} configuration updated."
+    )
 
 
 @server.tool()
-async def connect_mcp_server(context: Context, resource_id: str, mcp_server_id: str) -> TextContent:
+async def connect_mcp_server(
+    context: Context, resource_id: str, mcp_server_id: str
+) -> TextContent:
     """Connects a web server resource to another MCP server."""
     # This is a placeholder for now. In the future, this would involve
     # setting up the connection between the web server and the MCP server.
-    logger.info(f"Simulating connection of web server {resource_id} to MCP server {mcp_server_id}")
-    return TextContent(type="text", text=f"Web server {resource_id} connected to {mcp_server_id}.")
+    logger.info(
+        f"Simulating connection of web server {resource_id} to MCP server {mcp_server_id}"
+    )
+    return TextContent(
+        type="text", text=f"Web server {resource_id} connected to {mcp_server_id}."
+    )
 
 
 @server.tool()
@@ -93,7 +104,9 @@ async def get_config(context: Context) -> TextContent:
 
 
 @server.tool()
-async def render_template(context: Context, template_str: str, template_context: dict) -> TextContent:
+async def render_template(
+    context: Context, template_str: str, template_context: dict
+) -> TextContent:
     """Renders a Jinja2 template with the given context."""
     try:
         template = jinja2.Template(template_str)
@@ -131,6 +144,7 @@ async def parse_webapp_file(context: Context, path: str) -> TextContent:
             "content": content_str,
         }
         import json
+
         return TextContent(type="text", text=json.dumps(result, indent=2))
 
     except FileNotFoundError:
@@ -195,4 +209,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
