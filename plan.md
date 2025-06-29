@@ -49,7 +49,7 @@ extensible.
 
 ---
 
-### [ ] Step 1: Introduce the Core Services MCP Server & Orchestrator
+### [X] Step 1: Introduce the Core Services MCP Server & Orchestrator
 
 **Goal:** Lay the new architectural foundation by creating a `core-services` MCP
 server and an orchestrator agent that communicates with it. This decouples the
@@ -63,15 +63,15 @@ new architecture.
 
 **Tasks:**
 
-- [ ] **Create `src/server/core_services.py`**: Instantiate a `fastmcp.Server`.
-- [ ] **Create `src/server/web_resource.py`**: Create an empty `WebServer` class
+- [x] **Create `src/server/core_services.py`**: Instantiate a `fastmcp.Server`.
+- [x] **Create `src/server/web_resource.py`**: Create an empty `WebServer` class
       as a placeholder.
-- [ ] **Refactor `main.py`**: Redesign it to load config, spawn the
+- [x] **Refactor `main.py`**: Redesign it to load config, spawn the
       `core_services.py` subprocess, and run an "Orchestrator" agent.
-- [ ] **Create `src/prompts/orchestrator.md`**: Start with a placeholder prompt.
-- [ ] **Refactor `src/config.py`**: Use `pydantic-settings` for automatic
+- [x] **Create `src/prompts/orchestrator.md`**: Start with a placeholder prompt.
+- [x] **Refactor `src/config.py`**: Use `pydantic-settings` for automatic
       environment variable loading.
-- [ ] **Deprecate Old Logic**: Remove old startup code from `src/app.py` and
+- [x] **Deprecate Old Logic**: Remove old startup code from `src/app.py` and
       delete `src/server/agent_setup.py`.
 
 **Test Plan:**

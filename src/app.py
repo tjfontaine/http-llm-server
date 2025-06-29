@@ -23,11 +23,8 @@
 """
 Main application module for the HTTP LLM Server.
 
-This module contains the application wiring logic, including:
-- Application factory function
-- Startup and shutdown handlers
-- Main request handler
-- Local tools stdio server entry point
+This module contains the core request handler. The application factory
+and startup/shutdown logic has been moved to the new orchestration system.
 """
 
 import json
@@ -39,24 +36,13 @@ import jinja2
 from agents import Runner
 from aiohttp import web
 
-from .config import Config
-from .local_tools import create_local_tools_stdio_server
-from .logging_config import get_loggers
-from .server.agent_setup import initialize_mcp_servers_and_agent
 from .server.errors import send_llm_error_response_aiohttp
-from .server.middleware import (
-    error_handling_middleware,
-    logging_and_metrics_middleware,
-    session_cleanup_middleware,
-    session_middleware,
-)
 from .server.parsing import get_raw_request_aiohttp
-from .server.conversation import HttpConversationStore
-from .server.mcp_session import McpSessionStore
 from .server.streaming import LLMResponseStreamer
+from .logging_config import get_loggers
 
 # Initialize with default logging - will be reconfigured when config is available
-app_logger, access_logger, conversation_logger = get_loggers()
+app_logger, _, _ = get_loggers()
 
 
 async def handle_http_request(request: web.Request) -> web.StreamResponse:
@@ -218,102 +204,3 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         )
 
     return response
-
-
-async def on_startup(app: web.Application):
-    """Initialize application state and connections."""
-    config: Config = app["config"]
-    app_logger.info("Server is starting up...")
-    app["start_time"] = time.time()
-    await initialize_mcp_servers_and_agent(config, app)
-    app_logger.info("Server startup complete.")
-
-
-async def on_shutdown(app: web.Application):
-    """
-    Actions to perform on server shutdown.
-    """
-    app_logger.info("\nServer shutting down (async)...")
-
-    # Save all conversations to disk if enabled
-    if app["config"].save_conversations:
-        log_directory = "conversation_logs"
-        current_session_store = app["session_store"]
-        await current_session_store.save_all_sessions_on_shutdown(log_directory)
-
-    # Close all MCP server connections
-    app_logger.info(
-        f"Closing {len(app['mcp_server_lifecycles'])} MCP server connections..."
-    )
-    for mcp_server in app["mcp_server_lifecycles"]:
-        try:
-            await mcp_server.cleanup()
-            app_logger.info(f"Closed MCP server: {mcp_server.name}")
-        except Exception as e:
-            app_logger.error(
-                f"Error closing MCP server {mcp_server.name}: {e}", exc_info=True
-            )
-
-    app_logger.info("Server shutdown actions completed.")
-
-
-def create_app(config: Config) -> web.Application:
-    """
-    Application factory.
-    """
-    # Create the web application
-    app = web.Application(
-        middlewares=[
-            logging_and_metrics_middleware(),
-            session_cleanup_middleware(),
-            error_handling_middleware(),
-            session_middleware(),
-        ]
-    )
-
-    # Store config and initialize state stores
-    app["global_state"] = {}
-    app["config"] = config
-    app["session_store"] = HttpConversationStore(save_to_disk=config.save_conversations)
-    app["error_llm_system_prompt_template"] = config.error_llm_system_prompt_template
-
-    # Load and store the debug panel prompt if debug mode is enabled
-    if config.debug:
-        try:
-            with open("src/prompts/debug.md", "r", encoding="utf-8") as f:
-                app["debug_panel_prompt"] = f.read()
-            app_logger.info("Successfully loaded debug panel prompt for debug mode.")
-        except FileNotFoundError:
-            app_logger.error(
-                "Could not find 'src/prompts/debug.md'. Debug panel will not be available."
-            )
-            app["debug_panel_prompt"] = ""
-        except Exception as e:
-            app_logger.error(f"Error reading 'src/prompts/debug.md': {e}")
-            app["debug_panel_prompt"] = ""
-
-    app.router.add_route("*", "/{path:.*}", handle_http_request)
-
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    return app
-
-
-
-def run_local_tools_stdio_server():
-    """Entry point for running the local tools server as a stdio MCP server."""
-    # This server runs in its own process and has its own independent state.
-    app_logger.info("Starting local tools stdio server...")
-    # Create separate MCP session store for the subprocess - not saved to disk
-    mcp_session_store = McpSessionStore()
-    global_state = {}
-    tools_app = create_local_tools_stdio_server(global_state, mcp_session_store)
-
-    # The StdioServer's run() method is async and will run until the process is terminated.
-    try:
-        tools_app.run(transport="stdio")
-    except KeyboardInterrupt:
-        app_logger.info("Local tools stdio server shut down by user.")
-    finally:
-        app_logger.info("Local tools stdio server has exited.")

@@ -1,0 +1,2 @@
+class WebServer:
+    pass 
