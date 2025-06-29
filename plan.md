@@ -170,7 +170,7 @@ testable Python code on the server.
 
 ---
 
-### [ ] Step 4: Simplify the Final Orchestrator
+### [X] Step 4: Simplify the Final Orchestrator
 
 **Goal:** Update the main `orchestrator.md` prompt to be a simple, declarative
 instruction that uses the new high-level tool.
@@ -183,9 +183,9 @@ understand.
 
 **Tasks:**
 
-- [ ] Replace the detailed, multi-step content in `src/prompts/orchestrator.md`
+- [x] Replace the detailed, multi-step content in `src/prompts/orchestrator.md`
       with its final, simple form: "Call the `setup_web_app` tool."
-- [ ] Ensure `main.py` points the orchestrator agent to this final prompt.
+- [x] Ensure `main.py` points the orchestrator agent to this final prompt.
 
 **Test Plan (End-to-End Verification):**
 
@@ -201,3 +201,102 @@ understand.
 
 **Git Commit Message:**
 `refactor(agent): Simplify orchestrator to use high-level setup_web_app tool`
+
+---
+
+### [ ] Step 5: Restore Dynamic and Local Tooling
+
+**Goal:** Restore the critical ability for the web application's agent to use
+both the original "local tools" (for state management) and any external tools
+defined in the `WEB_APP_FILE`.
+
+**Why This Step Matters:** The initial refactoring achieved architectural purity
+but resulted in a net loss of functionality. The agent handling user requests is
+currently isolated, unable to connect to other tool servers or manage state.
+This step restores that core capability, making the agent powerful again.
+
+**Tasks:**
+
+- [ ] **Migrate Local Tools into Core Services**: - Re-implement the tools from
+      the old `src/local_tools.py` directly within
+      `src/server/core_services.py`. This includes: `download_file`,
+      `create_session`, `assign_session_id`, `get/set_global_state`, and the
+      full `*session_data` suite. - These tools will use state dictionaries
+      (`global_state`, `mcp_session_store`) held in memory within the
+      `core_services` process.
+
+- [ ] **Make `setup_web_app` Configuration-Aware**: - Modify the `setup_web_app`
+      tool in `core_services.py`. - It must now read the `config.web_app_file`
+      path. - It must call the `parse_webapp_file` tool to extract the YAML
+      metadata, specifically looking for the `mcp_servers` list. - This
+      extracted configuration must be passed to the `WebServer` resource when it
+      is being configured.
+
+- [ ] **Empower the `WebServer` Resource**: - In `src/server/web_resource.py`,
+      the `WebServer` class must be enhanced to create and manage its own
+      `Agent` instance. - Add a new method, like
+      `initialize_agent(self, mcp_servers_config: list, core_services_tools: list)`. -
+      This method will contain the logic from the old `agent_setup.py`: - It
+      will instantiate the `Agent` for handling HTTP requests. - It will loop
+      through the `mcp_servers_config`, create the appropriate `agents.mcp`
+      clients, and connect to them. - It will add both the newly connected
+      external tools and the built-in `core_services` tools to its agent. - The
+      `start` method of the `WebServer` will call `initialize_agent` before
+      launching the `aiohttp` server.
+
+**Test Plan:**
+
+1.  Create a test `prompt.md` with an `mcp_servers` entry pointing to a simple
+    external tool server (can be faked with a simple script).
+2.  The prompt instructions should tell the agent to call a tool on that
+    external server.
+3.  The prompt should also instruct the agent to use one of the newly migrated
+    local tools, like `set_global_state` and then `get_global_state`.
+4.  Run the application.
+5.  **Verification**: The logs should show the `WebServer`'s agent successfully
+    calling both the external tool and the internal `core-services` tool,
+    proving that dynamic tooling has been restored.
+
+**Git Commit Message:**
+`feat(agent): Restore dynamic and local tooling to web server agent`
+
+---
+
+### [ ] Step 6: Restore True End-to-End One-Shot Testing
+
+**Goal:** Reinstate the original, more valuable behavior of the `--one-shot`
+flag to perform a full, end-to-end HTTP request/response test.
+
+**Why This Step Matters:** The current `--one-shot` mode only verifies that
+orchestration starts; it doesn't verify that the resulting server actually
+works. A true round-trip test is essential for CI/CD and for reliably validating
+that changes have not broken the final output.
+
+**Tasks:**
+
+- [ ] **Update `main.py`**: - Add logic that runs after the
+      `Runner.run_streamed` call for the orchestrator completes. - If the
+      `config.one_shot` flag is `True`, the script should proceed to: - Create
+      an `aiohttp.ClientSession`. - Make a `GET` request to
+      `http://localhost:{config.port}/`. - Capture the full, raw HTTP response
+      (status line, headers, and body). - Print the raw response to the console
+      for verification.
+- [ ] **Ensure Clean Shutdown**: - The `main.py` script already waits for the
+      orchestrator to finish and uses a context manager for the `MCPServerStdio`
+      client. This should correctly trigger the shutdown of the `core-services`
+      process (and by extension, the `WebServer` resource) after the one-shot
+      request is complete. No extra shutdown logic should be needed, but this
+      must be verified.
+
+**Test Plan:**
+
+1.  Run the command:
+    `WEB_APP_FILE=examples/simple_blog/prompt.md uv run start -- --one-shot`
+2.  **Verification**: The output should not just be the orchestrator logs. It
+    must include a full, raw HTTP response printed to standard output, beginning
+    with `HTTP/1.1 200 OK`, followed by headers and the HTML body of the simple
+    blog page. This confirms the entire stack worked, from orchestration to
+    request handling.
+
+**Git Commit Message:**
+`fix(testing): Restore true end-to-end behavior to one-shot mode`
