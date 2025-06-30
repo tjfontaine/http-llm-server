@@ -50,10 +50,12 @@ running web application _is_ the agent?
 Instead of a human writing prompts for an agent to generate code, a human writes
 prompts that define the _personality and capabilities_ of a web application. The
 server itself, powered by an LLM, then decides how to handle incoming requests
-at runtime. This is analogous to the shift the software industry saw with the
-advent of dynamic languages and Just-in-Time (JIT) compilers. The Java Virtual
-Machine (JVM), for example, doesn't run pre-compiled machine code; it runs
-bytecode and decides at runtime how to optimize and execute it.
+at runtime. This is not about discarding the hard-won lessons of computer
+science, but about applying them in a new, dynamic way. It's analogous to the
+shift the software industry saw with the advent of dynamic languages and
+Just-in-Time (JIT) compilers. The Java Virtual Machine (JVM), for example,
+doesn't run pre-compiled machine code; it runs bytecode and decides at runtime
+how to optimize and execute it.
 
 ```mermaid
 graph LR;
@@ -86,16 +88,18 @@ phases:
 1.  **Proof of Concept:** The project began as a single, monolithic Python
     script. This initial version served to prove that the fundamental concept
     was viable: an LLM could indeed receive a raw HTTP request and generate a
-    complete, valid HTTP response.
+    complete, valid HTTP response, and maintain consistency through storing
+    requests as conversation history.
 
 2.  **Modularization and Tooling:** The monolith was refactored into a
     structured application. This involved separating the server's core logic
     from the application's entrypoint, introducing Pydantic for type-safe
     configuration, and, most importantly, integrating the first **Local Tools**
     MCP server. This gave the Application AI the ability to manage sessions and
-    state, moving it beyond a stateless request/response model.
+    state, moving it beyond a stateless request/response model. Also it enabled
+    web applications to define their own MCP servers to connect to.
 
-3.  **MCP-driven Orchestration:** The final and most significant architectural
+3.  **MCP-driven Orchestration:** The next and most significant architectural
     shift was to fully embrace MCP as a control plane. The `main.py` entrypoint
     now launches an **Orchestrator AI** that uses a dedicated **Core Services**
     MCP server to manage the entire lifecycle of the web application. This
@@ -170,13 +174,21 @@ Here are the next steps on our journey:
 
 ### 1. Advanced Tooling and Lifecycle Management
 
-Currently, our server primarily operates in a Just-in-Time (JIT) fashion. To
-build more sophisticated and efficient applications, we need to empower our
-agent with a richer set of lifecycle tools, managed by the Orchestrator:
+The power of Just-in-Time (JIT) generation is immense for improving the
+iteration speed for developers writing application prompts. However, we are not
+ignoring the valuable history of computer science on whose shoulders we stand.
+The goal is not to live entirely in a JIT world, but to give the AI the wisdom
+to use established performance patterns when appropriate.
 
-- **Ahead-of-Time (AOT) Compilation:** Develop core services that allow the
-  Orchestrator to analyze an application prompt and pre-compile stable
-  components into reusable tools for the Application AI.
+- **Ahead-of-Time (AOT) Compilation:** For stable, well-defined components, the
+  Orchestrator should be able to analyze the application prompt and pre-compile
+  parts of the application into reusable, high-performance tools for the
+  Application AI. This is classic compilation, just initiated by an AI at
+  runtime.
+- **Dynamic Caching and Memoization:** The Application AI should learn to
+  identify frequently requested, non-dynamic content and cache it, avoiding
+  unnecessary LLM calls. This is standard caching strategy, but the decision to
+  cache is made by the runtime agent.
 - **Dynamic Tool Provisioning:** Create a workflow where the Application AI can
   request a new tool, and the Orchestrator can build, test, and deploy it into
   the running environment without a human in the loop.
