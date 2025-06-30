@@ -14,7 +14,7 @@ serves it. It's a stable, predictable, and entirely static process. The
 application's logic is frozen at deployment time.
 
 ```mermaid
-graph TD;
+graph LR;
     A["Human Developer"] --> B("Writes Code");
     B --> C("Build/Compile");
     C --> D("Deploy");
@@ -32,7 +32,7 @@ deployed primarily by developers with a goal of producing code, vs being focused
 on the outcome.
 
 ```mermaid
-graph TD;
+graph LR;
     A["Human Developer"] --> B("Writes Prompt");
     B --> C{"AI Assistant"};
     C --> D("Generates Code");
@@ -56,7 +56,7 @@ Machine (JVM), for example, doesn't run pre-compiled machine code; it runs
 bytecode and decides at runtime how to optimize and execute it.
 
 ```mermaid
-graph TD;
+graph LR;
     A["Human Developer"] --> B("Writes Prompt");
     B --> C{"Orchestrator AI"};
     C -- "Uses Core Services MCP" --> D["Manages WebServer Resource"];
