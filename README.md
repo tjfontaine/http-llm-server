@@ -78,40 +78,29 @@ This two-tiered system creates a clean separation of concerns:
   sessions, state, and data. It tracks HTTP requests/responses as conversation
   history, allowing for per session customized responses.
 
-## The Journey to Here: From Monolith to Orchestrator
+## The Journey to Here
 
-To attempt this, the project evolved through 3 forms:
+To enable this paradigm, the project evolved through several key architectural
+phases:
 
-1.  **From Monolith to Modularity:** The project began as a single, monolithic
-    script that proved the basic concept was possible. It was quickly broken
-    apart, separating the server's runtime from its core logic. This was the
-    first step toward a robust system.
-2.  **From Chaos to Order:** We then introduced strong, type-safe models for
-    configuration and data, taming the chaos of environment variables and
-    command-line arguments. This moved the project from a fragile script to a
-    piece of engineered software.
-3.  **From Agent to Orchestrator:** We fully embraced the
-    [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction)
-    as our control plane. The `main.py` entrypoint no longer starts a web
-    server; it starts an **Orchestrator AI**. This AI acts as an MCP client,
-    using a dedicated "Core Services" MCP server to manage the web application's
-    entire lifecycle. This creates a powerful two-tiered system: the
-    Orchestrator uses one set of MCP tools to manage the server, and the
-    `WebServer` resource, in turn, provides its own MCP environment with a
-    different set of tools for the **Application AI** to use when handling
-    requests.
+1.  **Proof of Concept:** The project began as a single, monolithic Python
+    script. This initial version served to prove that the fundamental concept
+    was viable: an LLM could indeed receive a raw HTTP request and generate a
+    complete, valid HTTP response.
 
-This two-tiered system creates a clean separation of concerns:
+2.  **Modularization and Tooling:** The monolith was refactored into a
+    structured application. This involved separating the server's core logic
+    from the application's entrypoint, introducing Pydantic for type-safe
+    configuration, and, most importantly, integrating the first **Local Tools**
+    MCP server. This gave the Application AI the ability to manage sessions and
+    state, moving it beyond a stateless request/response model.
 
-- **Tier 1: The Orchestrator AI** uses infrastructure-level tools to manage the
-  lifecycle of the web server. Its tools include `setup_web_app`,
-  `create_web_resource`, and `start_web_server`. It operates on the level of
-  processes and resources.
-
-- **Tier 2: The Application AI** uses application-level tools to handle a
-  specific HTTP request. Its tools include `create_session`, `get_session_data`,
-  `set_global_state`, and `download_file`. It operates on the level of user
-  sessions, state, and data.
+3.  **MCP-driven Orchestration:** The final and most significant architectural
+    shift was to fully embrace MCP as a control plane. The `main.py` entrypoint
+    now launches an **Orchestrator AI** that uses a dedicated **Core Services**
+    MCP server to manage the entire lifecycle of the web application. This
+    established the two-tiered model where one AI manages the environment for
+    another.
 
 This architecture is what enables the new paradigm. The Orchestrator is the
 bootloader for a generative, AI-powered web application.
