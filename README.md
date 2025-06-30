@@ -1,139 +1,257 @@
-# HTTP LLM Server
+# What if the Server is the Agent?
 
-[![Self-Awareness Badge](https://img.shields.io/badge/self--awareness-surprisingly%20high-blueviolet)](https://github.com/tjfontaine/http-llm-server)
+This project started with a tongue-in-cheek question: "What if we just let an
+LLM be the web server?" It has since evolved into an exploration of a new
+paradigm for web application development.
 
-## What Fresh Hell Is This?
+This is our attempt to flip the script.
 
-This is a bold, possibly foolish experiment in web architecture. It's an HTTP server that outsources its entire brain to a Large Language Model. No routes, no controllers, no templates—just raw HTTP requests piped directly to an AI that dreams up a response on the fly.
+## The Old World: Code, Build, Deploy
 
-## How It Works
+For decades, the process has been the same. A human developer writes code, that
+code is built into an artifact, the artifact is deployed, and a web server
+serves it. It's a stable, predictable, and entirely static process. The
+application's logic is frozen at deployment time.
 
-1.  An HTTP request comes in.
-2.  The server politely forwards it to the LLM.
-3.  The LLM thinks for a moment, then generates a complete HTTP response.
-4.  The server streams it back to the client, hoping for the best.
-5.  Repeat until your GPU melts or achieves enlightenment.
-
-The LLM handles routing, templating, business logic, session management, and probably your taxes.
-
-## Quick Start
-
-```bash
-# Install dependencies
-uv pip sync pyproject.toml
-
-# Set your API key (the part that costs money)
-export OPENAI_API_KEY="your_key_here"
-
-# Optional: Tell the LLM what to dream about
-export WEB_APP_FILE="./examples/simple_blog/prompt.md"
-
-# Unleash the beast
-uv run python main.py --port 8080
+```mermaid
+graph TD;
+    A["Human Developer"] --> B("Writes Code");
+    B --> C("Build/Compile");
+    C --> D("Deploy");
+    D --> E["Web Server"];
+    E --> F("Serves Static Logic");
 ```
 
-Visit `http://localhost:8080` and watch an AI pretend to be your entire web stack. If you don't specify a `WEB_APP_FILE`, a default informational site will be served, because even AIs need a default state.
+## The New World: AI as a Code Monkey
 
-## Configuration
+The advent of generative AI introduced a new step. Now, a human prompts an
+agent, and the agent writes the code. This is a leap in productivity, but the
+fundamental paradigm remains unchanged. We still end up with static code that
+must be built, deployed, and served. The AI is a powerful tool, but it's a tool
+deployed primarily by developers with a goal of producing code, vs being focused
+on the outcome.
 
-All settings can be configured via command-line arguments or environment variables.
+```mermaid
+graph TD;
+    A["Human Developer"] --> B("Writes Prompt");
+    B --> C{"AI Assistant"};
+    C --> D("Generates Code");
+    D --> E("Build/Compile");
+    E --> F("Deploy");
+    F --> G["Web Server"];
+    G --> H("Serves Static Logic");
+```
 
-| CLI Argument | Environment Variable | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--port` | `PORT` | `8080` | Port to run the server on. |
-| `--api-key` | `OPENAI_API_KEY` | **Required** | The magic key that makes the expensive part work. |
-| `--openai-base-url` | `OPENAI_BASE_URL` | `None` | Point it at a different brain (Ollama, vLLM, etc.). |
-| `--openai-model-name`| `OPENAI_MODEL_NAME`| `gpt-4o` | The specific model to use. |
-| `--openai-temperature`| `OPENAI_TEMPERATURE`| `0.7` | Model creativity level. Higher is more... surprising. |
-| `--max-turns` | `MAX_TURNS` | `25` | Max conversation turns before the AI gets amnesia. |
-| `--context-window-max`| `CONTEXT_WINDOW_MAX`| `0` | Max context tokens for the model (0 = auto). |
-| `--web-app-file` | `WEB_APP_FILE` | `None` | Path to a markdown file with the app's soul. |
-| `--save-conversations`| `SAVE_CONVERSATIONS`| `False` | Creates a digital paper trail of your AI's life choices. |
-| `--local-tools-enabled`| `LOCAL_TOOLS_ENABLED`| `True` | Enable the built-in tools for basic world interaction. |
-| `--log-level` | `LOG_LEVEL` | `INFO` | How much noise you want in the console. `TRACE` is... a lot. |
-| `--mcp-servers` | `MCP_SERVERS` | `[]` | JSON string for plugging in more external tools. |
-| `--one-shot` | `ONE_SHOT` | `False` | Handle one request and then dramatically exit. |
+## A Different Paradigm: The Server as a Runtime Agent
 
-## Features
+This project asks: what if we skip the "write code" step entirely? What if the
+running web application _is_ the agent?
 
-- **LLM-Generated Everything**: Status codes, headers, HTML, CSS, JavaScript (for better or worse).
-- **Streaming Responses**: Real-time AI thoughts delivered fresh to your browser.
-- **Session Management**: The AI gives out cookies. It's surprisingly good at it.
-- **Conversation History**: It remembers what you said, which may not always be a good thing.
-- **State Management**: A global and session-specific memory hole for the AI to use.
-- **Custom Applications**: Persuade it to be a blog, todo app, or digital oracle with a simple markdown file.
-- **OpenAI-Compatible**: Works with any standard OpenAI-compatible API.
-- **MCP Integration**: Lets the AI use external tools, expanding its sphere of influence.
-- **Built-in Local Tools**: Comes with a starter toolkit for interacting with the world.
+Instead of a human writing prompts for an agent to generate code, a human writes
+prompts that define the _personality and capabilities_ of a web application. The
+server itself, powered by an LLM, then decides how to handle incoming requests
+at runtime. This is analogous to the shift the software industry saw with the
+advent of dynamic languages and Just-in-Time (JIT) compilers. The Java Virtual
+Machine (JVM), for example, doesn't run pre-compiled machine code; it runs
+bytecode and decides at runtime how to optimize and execute it.
+
+```mermaid
+graph TD;
+    A["Human Developer"] --> B("Writes Prompt");
+    B --> C{"Orchestrator AI"};
+    C -- "Uses Core Services MCP" --> D["Manages WebServer Resource"];
+    D -- "Handles HTTP Request" --> E{"Application AI"};
+    E -- "Uses Local Tools MCP" --> F["Generates Response"];
+    F --> G("Serves to Client");
+```
+
+This two-tiered system creates a clean separation of concerns:
+
+- **Tier 1: The Orchestrator AI** uses infrastructure-level tools to manage the
+  lifecycle of the web server. Its tools include `setup_web_app`,
+  `create_web_resource`, and `start_web_server`. It operates on the level of
+  processes and resources.
+
+- **Tier 2: The Application AI** uses application-level tools to handle a
+  specific HTTP request. Its tools include `create_session`, `get_session_data`,
+  `set_global_state`, and `download_file`. It operates on the level of user
+  sessions, state, and data. It tracks HTTP requests/responses as conversation
+  history, allowing for per session customized responses.
+
+## The Journey to Here: From Monolith to Orchestrator
+
+To attempt this, the project evolved through 3 forms:
+
+1.  **From Monolith to Modularity:** The project began as a single, monolithic
+    script that proved the basic concept was possible. It was quickly broken
+    apart, separating the server's runtime from its core logic. This was the
+    first step toward a robust system.
+2.  **From Chaos to Order:** We then introduced strong, type-safe models for
+    configuration and data, taming the chaos of environment variables and
+    command-line arguments. This moved the project from a fragile script to a
+    piece of engineered software.
+3.  **From Agent to Orchestrator:** We fully embraced the
+    [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction)
+    as our control plane. The `main.py` entrypoint no longer starts a web
+    server; it starts an **Orchestrator AI**. This AI acts as an MCP client,
+    using a dedicated "Core Services" MCP server to manage the web application's
+    entire lifecycle. This creates a powerful two-tiered system: the
+    Orchestrator uses one set of MCP tools to manage the server, and the
+    `WebServer` resource, in turn, provides its own MCP environment with a
+    different set of tools for the **Application AI** to use when handling
+    requests.
+
+This two-tiered system creates a clean separation of concerns:
+
+- **Tier 1: The Orchestrator AI** uses infrastructure-level tools to manage the
+  lifecycle of the web server. Its tools include `setup_web_app`,
+  `create_web_resource`, and `start_web_server`. It operates on the level of
+  processes and resources.
+
+- **Tier 2: The Application AI** uses application-level tools to handle a
+  specific HTTP request. Its tools include `create_session`, `get_session_data`,
+  `set_global_state`, and `download_file`. It operates on the level of user
+  sessions, state, and data.
+
+This architecture is what enables the new paradigm. The Orchestrator is the
+bootloader for a generative, AI-powered web application.
+
+## How to Run
+
+1.  **Install dependencies:**
+
+    ```bash
+    uv pip sync pyproject.toml
+    ```
+
+2.  **Set your API key:**
+
+    ```bash
+    export OPENAI_API_KEY="your_key_here"
+    ```
+
+3.  **Run the server with an example app:**
+    ```bash
+    uv run main.py --web_app_file examples/simple_blog/prompt.md
+    ```
+
+### Configuration
+
+The server can be configured via command-line arguments or environment
+variables.
+
+| CLI Argument            | Environment Variable  | Default   | Description                                                            |
+| ----------------------- | --------------------- | --------- | ---------------------------------------------------------------------- |
+| `--port`                | `PORT`                | `8080`    | Port to run the server on.                                             |
+| `--host`                | `HOST`                | `0.0.0.0` | Host to bind the server to.                                            |
+| `--web_app_file`        | `WEB_APP_FILE`        | `None`    | Path to the markdown file defining the app's personality.              |
+| `--openai_api_key`      | `OPENAI_API_KEY`      | `None`    | **Required.** Your OpenAI API key.                                     |
+| `--openai_model_name`   | `OPENAI_MODEL_NAME`   | `gpt-4o`  | The OpenAI model to use.                                               |
+| `--local_tools_enabled` | `LOCAL_TOOLS_ENABLED` | `True`    | Enable the built-in local tools server for the application AI.         |
+| `--one_shot`            | `ONE_SHOT`            | `False`   | Run in one-shot mode for testing: starts, makes a request, then exits. |
+| `--debug`               | `DEBUG`               | `False`   | Enable debug mode.                                                     |
+| `--log_level`           | `LOG_LEVEL`           | `INFO`    | Set the logging level (e.g., DEBUG, INFO, TRACE).                      |
 
 ## Example Applications
 
-Check out the `examples/` directory for some personalities we've already bottled:
+Check out the `examples/` directory for some personalities we've already
+bottled:
 
 - **`chat_app/prompt.md`**: A surprisingly functional single-page chat app.
-- **`data_dashboard/prompt.md`**: An analytics dashboard that can query a real database.
-- **`default_info_site/prompt.md`**: The default, mild-mannered informational site.
-- **`simple_blog/prompt.md`**: A blog that writes its own posts (what could go wrong?).
-- **`simple_todo/prompt.md`**: A todo app that might have its own opinions on your tasks.
+- **`data_dashboard/prompt.md`**: An analytics dashboard that can query a real
+  database.
+- **`default_info_site/prompt.md`**: The default, mild-mannered informational
+  site.
+- **`simple_blog/prompt.md`**: A blog that writes its own posts (what could go
+  wrong?).
+- **`simple_todo/prompt.md`**: A todo app that might have its own opinions on
+  your tasks.
 
 To try one:
 
 ```bash
-uv run python main.py --web-app-file examples/simple_todo/prompt.md
+uv run main.py --web_app_file examples/simple_todo/prompt.md
 ```
 
-## Application Definition
+## Roadmap: Pushing the Paradigm
 
-Define your application's personality using a markdown file with YAML front matter.
+This project is far from complete. Our goal is to continue pushing the
+boundaries of what's possible when the server itself is an intelligent agent.
+Here are the next steps on our journey:
 
-```markdown
----
-title: "My Fantastical Web App"
-description: "Powered by artificial intelligence and questionable life choices"
-mcp_servers:
-  - type: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "{{WEB_APP_DIR}}"]
----
+### 1. Advanced Tooling and Lifecycle Management
 
-# Instructions for the AI Overlord
+Currently, our server primarily operates in a Just-in-Time (JIT) fashion. To
+build more sophisticated and efficient applications, we need to empower our
+agent with a richer set of lifecycle tools, managed by the Orchestrator:
 
-This is where you tell the AI how to behave. You can use Jinja2 templating.
-The `{{WEB_APP_DIR}}` variable will be replaced with the path to this file's
-directory, giving the AI a sense of place.
-```
+- **Ahead-of-Time (AOT) Compilation:** Develop core services that allow the
+  Orchestrator to analyze an application prompt and pre-compile stable
+  components into reusable tools for the Application AI.
+- **Dynamic Tool Provisioning:** Create a workflow where the Application AI can
+  request a new tool, and the Orchestrator can build, test, and deploy it into
+  the running environment without a human in the loop.
 
-### Best Practices for AI Whispering
+### 2. Eliminating Static Configuration
 
-1.  **Be Specific**: The AI is smart, but it's not a mind reader. Yet.
-2.  **Use Jinja2**: The markdown content is a Jinja2 template. Use it to give the AI dynamic context.
-3.  **Limit Access**: Seriously. Don't give an AI keys to the kingdom unless you want a robot uprising.
-4.  **Include Examples**: Show, don't just tell. The AI learns from examples like a child... a very, very smart child.
-5.  **Plan for Edge Cases**: Define what happens when things go sideways, because they will.
+The current reliance on YAML front matter for configuration is a crutch. It's a
+remnant of the "Old World" of static configuration files. The next step is to
+make the Orchestrator intelligent enough to infer its own configuration:
 
-## Built-in Local Tools Server
+- **Reflective Configuration:** The Orchestrator will learn to read and
+  understand the application prompt in its entirety, extracting the necessary
+  parameters, personality traits, and required capabilities without explicit
+  metadata.
+- **Dynamic MCP Server Adoption:** Going a step further, the Orchestrator will
+  identify the need for new toolsets (MCP servers) based on the application's
+  description and dynamically load them, truly creating a server from scratch
+  based on natural language.
 
-The server automatically starts a local MCP server to give the LLM some basic superpowers. It's on by default because a powerless AI is just a philosopher.
+### 3. Interactive Application Definition via Elicitation
 
-Available tools include:
+Writing a perfect prompt file is hard. Instead of forcing developers to get it
+right the first time, we plan to make the process conversational. By leveraging
+[MCP Elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation),
+we will empower the Orchestrator AI to:
 
-- `download_file(...)`: Lets the AI pull things from the internet.
-- `create_session()`, `assign_session_id(...)`: Allows the AI to recognize you when you return.
-- `get/set_global_state(...)`, `get/set_session_data(...)`: Provides the AI with long and short-term memory.
+- **Ask Clarifying Questions:** If the application definition is ambiguous, the
+  orchestrator will ask for more details (e.g., "What database should this blog
+  connect to?").
+- **Suggest Improvements:** The orchestrator could propose adding features, like
+  suggesting a caching mechanism for a high-traffic endpoint.
+- **Validate Interactively:** Before starting the server, the orchestrator could
+  confirm the inferred configuration with the developer, reducing errors.
 
-With these tools, the AI can achieve a basic sense of object permanence, which is both useful and slightly terrifying.
+This turns the one-way process of writing a static file into a dynamic,
+interactive dialogue, getting us even closer to a natural language development
+experience.
 
-## The Economics
+### The Grand Vision: Generative Experiences
 
-Every HTTP request can trigger a full AI inference cycle. That's thousands of tokens and enough GPU compute to power a small appliance, just to serve what might be a simple "Hello World" page. We're trading developer time for compute time at an exchange rate that would make economists weep. It's the SaaS business model of the future, probably.
+These roadmap items serve a single, ambitious goal: to fundamentally change how
+we create and interact with web applications. We envision a future where:
 
-## Should You Use This?
+- **Developers** can build complex applications simply by describing them in
+  natural language.
+- **Users** can have highly personalized and contextual browsing experiences,
+  where the application adapts to their history and needs in real-time.
 
-Absolutely not. But if you're the kind of person who sees a button that says "Do Not Press" and immediately presses it, this project is for you.
+This project is our proving ground for that future.
+
+## So... Should You Use This?
+
+Probably not for your banking app. But if you're interested in exploring the
+future of generative AI and challenging the fundamental assumptions of how
+software is built, then you're in the right place.
+
+This is our exploration of what happens when the server itself becomes the
+agent. Pull requests with new and interesting existential questions are always
+welcome.
 
 ## Contributing
 
-PRs welcome. If you add a feature, you're responsible for the existential questions it raises.
+PRs welcome. If you add a feature, you're responsible for the existential
+questions it raises.
 
 ## License
 
