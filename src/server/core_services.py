@@ -62,12 +62,13 @@ async def create_web_resource(
     port: int,
     host: str = "localhost",
     mcp_servers: list = [],
+    log_level: str = "INFO",
 ) -> TextContent:
     """Creates a web resource and returns its unique ID."""
     try:
         logger.debug(
             f"Creating web resource: port={port}, host={host}, "
-            f"mcp_servers={len(mcp_servers)} servers"
+            f"mcp_servers={len(mcp_servers)} servers, log_level={log_level}"
         )
 
         resource_id = str(uuid.uuid4())
@@ -75,6 +76,7 @@ async def create_web_resource(
             port=port,
             host=host,
             mcp_servers_config=mcp_servers,
+            log_level=log_level,
         )
 
         # Store with metadata for better tracking
@@ -88,6 +90,7 @@ async def create_web_resource(
             ],
             "status": "created",
             "created": datetime.now().isoformat(),
+            "log_level": log_level,
         }
 
         success_msg = f"Web resource created with ID: {resource_id}"
@@ -166,6 +169,7 @@ async def setup_web_application(
     web_app_file: str,
     port: int = 8080,
     enable_local_tools: bool = True,
+    log_level: str = "INFO",
 ) -> TextContent:
     """
     Sets up the web application environment by creating and starting a WebServer.
@@ -250,7 +254,7 @@ async def setup_web_application(
 
         # Now, create and start the web resource with the collected MCP servers
         create_result = await create_web_resource(
-            context, port=port, mcp_servers=mcp_servers
+            context, port=port, mcp_servers=mcp_servers, log_level=log_level
         )
         resource_id_str = create_result.text
         resource_id_match = re.search(r"[a-f0-9-]+$", resource_id_str)
@@ -322,7 +326,8 @@ async def list_web_resources(context: Context) -> TextContent:
 
 async def main():
     """Main function to run the core services server."""
-    configure_subprocess_logging()
+    log_level = os.environ.get("CORE_SERVICES_LOG_LEVEL", "INFO")
+    configure_subprocess_logging(log_level)
     logger.info("Starting core services MCP server via stdio")
     await core_services.run_stdio_async()
 

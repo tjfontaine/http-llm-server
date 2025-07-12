@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from rich.logging import RichHandler
 
@@ -33,7 +32,9 @@ class SingleLineExtrasFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         extra = {
-            k: v for k, v in record.__dict__.items() if k not in _STANDARD_LOG_RECORD_KEYS
+            k: v
+            for k, v in record.__dict__.items()
+            if k not in _STANDARD_LOG_RECORD_KEYS
         }
 
         if extra:

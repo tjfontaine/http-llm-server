@@ -45,10 +45,10 @@ class Config(BaseSettings):
     web_app_file: Optional[str] = Field(default=None, alias="WEB_APP_FILE")
     save_conversations: bool = Field(default=False, alias="SAVE_CONVERSATIONS")
     local_tools_enabled: bool = Field(default=True, alias="LOCAL_TOOLS_ENABLED")
-    one_shot: bool = Field(
-        default=False,
+    one_shot: Optional[int] = Field(
+        default=None,
         alias="ONE_SHOT",
-        description="Run in one-shot mode: start server, make test request, then exit",
+        description="Run in one-shot mode for N conversations, then exit.",
     )
     local_tools_stdio: bool = Field(default=False, alias="LOCAL_TOOLS_STDIO")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -82,6 +82,9 @@ class Config(BaseSettings):
         """Initialize Config and load web app content if web_app_file is provided."""
         super().__init__(**kwargs)
 
+        # Always load the base system prompt first.
+        self._load_system_prompt()
+
         # If no web app file is specified, default to the default info site
         if not self.web_app_file:
             self.web_app_file = self._get_default_info_site_path()
@@ -90,10 +93,6 @@ class Config(BaseSettings):
         # the default)
         if self.web_app_file:
             self._load_web_app_content()
-
-        # Load default system prompt if not already set (fallback only)
-        if not self.system_prompt_template:
-            self._load_system_prompt()
 
     def _get_default_info_site_path(self) -> str:
         """Returns path to the default info site prompt."""
@@ -161,18 +160,13 @@ class Config(BaseSettings):
                     # Extract content portion as system prompt template
                     content_portion = yaml_match.group(2).strip()
                     if content_portion:
-                        self.system_prompt_template = content_portion
-                        self.web_app_rules = (
-                            content_portion  # For backward compatibility
-                        )
+                        self.web_app_rules = content_portion
 
                 except yaml.YAMLError:
                     # If YAML parsing fails, use the entire content
-                    self.system_prompt_template = content
                     self.web_app_rules = content
             else:
                 # No YAML front matter, use entire content
-                self.system_prompt_template = content
                 self.web_app_rules = content
 
         except Exception:

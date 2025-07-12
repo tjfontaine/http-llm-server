@@ -5,8 +5,6 @@ This module is focused specifically on MCP tool session management,
 separate from HTTP conversation tracking concerns.
 """
 
-import asyncio
-import logging
 from typing import Any
 
 

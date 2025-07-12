@@ -170,7 +170,10 @@ def logging_and_metrics_middleware():
                 "llm_finish_reason": last_chunk_finish_reason,
             }
 
-            log_msg_final = f"[{client_address_str}] {request.method} {request.path_qs} - {response.status}"
+            log_msg_final = (
+                f"[{client_address_str}] {request.method} {request.path_qs} - "
+                f"{response.status}"
+            )
 
             if model_error_indicator_for_recording:
                 log_msg_final += " [MODEL_ERROR]"
@@ -219,62 +222,28 @@ def session_middleware():
     ) -> web.StreamResponse:
         client_address_str = request.get("client_address_str", "Unknown Client")
 
-        session_id_from_cookie = None
-        if "Cookie" in request.headers:
-            cookie_header = request.headers["Cookie"]
-            try:
-                # Basic parsing, not a full cookie parser
-                if "session_id" in cookie_header:
-                    session_id_from_cookie = cookie_header.split("session_id=")[
-                        1
-                    ].split(";")[0]
-                    if session_id_from_cookie:
-                        app_logger.info(
-                            "Existing session ID from cookie",
-                            extra={
-                                "client_address": client_address_str,
-                                "session_id": session_id_from_cookie,
-                            },
-                        )
-            except Exception:
-                app_logger.exception(
-                    "Error parsing 'Cookie' header, treating as no session.",
-                    extra={
-                        "client_address": client_address_str,
-                        "header": cookie_header,
-                    },
-                )
+        # Use the built-in cookie parsing from aiohttp, which is more robust
+        # than manual string splitting.
+        session_id_from_cookie = request.cookies.get("session_id")
 
-        # Store session information on request
+        if session_id_from_cookie:
+            app_logger.debug(
+                "Existing session ID found in cookie",
+                extra={
+                    "client_address": client_address_str,
+                    "session_id": session_id_from_cookie,
+                },
+            )
+
+        # Store session information on request for the main handler to use
         request["session_id_from_cookie"] = session_id_from_cookie
-
-        # Session history and token count are now managed by the agent's session memory
-        request["llm_history"] = []
-        request["session_token_count"] = 0
 
         response = await handler(request)
 
-        final_session_id_for_turn = request.get("final_session_id_for_turn")
-
-        # Set cookie if a new session ID was generated
-        if (
-            final_session_id_for_turn
-            and final_session_id_for_turn != session_id_from_cookie
-        ):
-            app_logger.info(
-                "Setting new session cookie",
-                extra={
-                    "client_address": client_address_str,
-                    "session_id": final_session_id_for_turn,
-                },
-            )
-            response.set_cookie(
-                "session_id",
-                final_session_id_for_turn,
-                httponly=True,
-                samesite="Lax",
-                path="/",
-            )
+        # The responsibility for setting the cookie is now delegated to the
+        # StreamingContext, which has direct access to the tool call event that
+        # assigns the session ID. This middleware is now only responsible for
+        # reading the initial state.
 
         return response
 

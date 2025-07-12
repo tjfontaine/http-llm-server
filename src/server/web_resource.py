@@ -7,6 +7,7 @@ from agents import (
     Agent,
     AsyncOpenAI,
     OpenAIChatCompletionsModel,
+    enable_verbose_stdout_logging,
     set_tracing_disabled,
 )
 from agents.mcp import (
@@ -42,10 +43,18 @@ class WebServer:
         port: int,
         host: str,
         mcp_servers_config: list = [],
+        log_level: str = "INFO",
     ):
         self.port = port
         self.host = host
         self.mcp_servers_config = mcp_servers_config
+        self.log_level = log_level
+        # Note: Logging is configured by core_services.py main() for the subprocess
+
+        # Enable verbose agents library logging if TRACE level is requested
+        if log_level == "TRACE":
+            app_logger.debug("Enabling verbose agents library logging for TRACE level")
+            enable_verbose_stdout_logging()
         self.app = web.Application(
             middlewares=[
                 logging_and_metrics_middleware(),

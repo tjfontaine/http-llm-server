@@ -21,14 +21,12 @@
 # SOFTWARE.
 
 import asyncio
-import json
 import logging
 import os
 import sys
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Optional, Any
 
 import aiofiles
 import aiohttp
@@ -37,7 +35,6 @@ from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
 
 from src.logging_config import configure_logging
-from src.server.mcp_session import McpSessionStore
 
 # A server instance is created globally, and tools are registered against it.
 local_mcp_server = Server(

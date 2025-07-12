@@ -30,17 +30,30 @@ and startup/shutdown logic has been moved to the new orchestration system.
 import json
 import os
 import time
-import uuid
 from email.utils import formatdate
 
 import jinja2
-from agents import Runner, SQLiteSession
+from agents import Runner
+from agents.memory.session import SQLiteSession
 from aiohttp import web
 
-from .logging_config import get_loggers
-from .server.errors import send_llm_error_response_aiohttp
-from .server.parsing import get_raw_request_str
-from .server.streaming import LLMResponseStreamer
+from src.config import Config
+from src.logging_config import configure_logging, get_loggers
+from src.server.errors import send_llm_error_response_aiohttp
+from src.server.parsing import get_raw_request_str
+from src.server.streaming import LLMResponseStreamer
+
+# Initialize Jinja2 environment
+jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader("."),
+    autoescape=jinja2.select_autoescape(["html", "xml"]),
+)
+
+# Load application configuration
+config: Config = Config()
+
+# Configure logging as early as possible using the config's log level
+configure_logging(config.log_level)
 
 # Initialize with default logging - will be reconfigured when config is available
 app_logger, _, _ = get_loggers()
@@ -76,14 +89,17 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # history = request["llm_history"] # No longer needed, handled by SQLiteSession
     # current_token_count = request["session_token_count"] # No longer needed
 
-    # Ensure session_id exists
-    session_id = session_id_from_cookie or str(uuid.uuid4())
-    request["final_session_id_for_turn"] = session_id  # Make it available to middleware
+    # The LLM is responsible for creating the session. If no cookie is present,
+    # the agent will run in a stateless mode for this turn until the LLM
+    # creates a session using a tool.
+    session_id = session_id_from_cookie
+    if not session_id:
+        app_logger.info(
+            "No session ID found in cookie. Relying on LLM to create a session."
+        )
 
-    # Create SQLite session
-    db_path = "data/http-llm-server.db"
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    session = SQLiteSession(session_id=session_id, db_path=db_path)
+    # The agent's session handler can accept None for a stateless turn.
+    session = SQLiteSession(session_id=session_id, db_path="data/http-llm-server.db")
 
     # Get raw request text
     raw_request_text = await get_raw_request_str(request)
@@ -207,7 +223,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         cloned_agent,
         raw_request_text,
         max_turns=max_turns,
-        session=session,
+        session=session if session.session_id else None,
     )
 
     # Delegate streaming to the dedicated streamer class

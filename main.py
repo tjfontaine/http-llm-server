@@ -108,6 +108,7 @@ async def main():
             )
 
     configure_logging(config.log_level)
+    logging.getLogger("agents").setLevel(logging.DEBUG)
 
     app_logger.info(
         "Starting application with key configurations",
@@ -158,6 +159,7 @@ async def main():
             orchestrator_instructions = orchestrator_template.format(
                 web_app_file=config.web_app_file or "",
                 enable_local_tools=str(config.local_tools_enabled).lower(),
+                log_level=config.log_level,
             )
         except FileNotFoundError:
             app_logger.error(f"Orchestrator file not found: {orchestrator_file}")
@@ -187,40 +189,45 @@ async def main():
                 app_logger.info("Orchestrator agent completed")
                 break
 
-        # If one-shot mode, check server readiness then make one test request
+        # If one-shot mode, check server readiness then make N test requests
         if config.one_shot:
             app_logger.info("One-shot mode: Checking server readiness...")
-            app_logger.info("Making single test request...")
             await asyncio.sleep(2)  # Give the server a moment to be ready
             await wait_for_server(f"http://localhost:{config.port}", timeout=20)
 
+            import aiohttp
+
+            app_logger.info(
+                f"Server is ready! Making {config.one_shot} test request(s) to http://localhost:{config.port}/"
+            )
+
             try:
+                async with aiohttp.ClientSession() as session:
+                    for i in range(config.one_shot):
+                        app_logger.info(
+                            f"Making test request {i + 1}/{config.one_shot}..."
+                        )
+                        async with session.get(
+                            f"http://localhost:{config.port}/",
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            response_text = await response.text()
+
+                        print("\n" + "=" * 50)
+                        print(f"ONE-SHOT HTTP RESPONSE {i + 1}/{config.one_shot}:")
+                        print("=" * 50)
+                        print(f"Status: {response.status}")
+                        print(f"Headers: {dict(response.headers)}")
+                        print("\nBody:")
+                        print(response_text)
+                        print("=" * 50)
+
                 app_logger.info(
-                    f"Server is ready! Making single test request to http://localhost:{config.port}/"
+                    f"All {config.one_shot} one-shot request(s) completed successfully"
                 )
 
-                import aiohttp
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"http://localhost:{config.port}/",
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        response_text = await response.text()
-
-                print("\n" + "=" * 50)
-                print("ONE-SHOT HTTP RESPONSE:")
-                print("=" * 50)
-                print(f"Status: {response.status}")
-                print(f"Headers: {dict(response.headers)}")
-                print("\nBody:")
-                print(response_text)
-                print("=" * 50)
-
-                app_logger.info("One-shot request completed successfully")
-
             except Exception as e:
-                app_logger.error(f"One-shot HTTP request failed: {e}")
+                app_logger.error(f"One-shot HTTP request(s) failed: {e}")
         else:
             app_logger.info("Application started successfully. Running in server mode.")
             # Wait for the shutdown event

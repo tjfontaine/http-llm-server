@@ -4,8 +4,8 @@ import json
 from typing import Any, AsyncGenerator
 
 from agents import Agent
-from agents.stream_events import RunItemStreamEvent, RawResponsesStreamEvent
 from agents.items import RunItem, ToolCallItem
+from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
@@ -32,6 +32,7 @@ class StreamingContext:
         self.completion_tokens_from_usage = 0
         self.total_tokens_from_usage = 0
         self._last_chunk_finish_reason: str | None = None
+        self.session_id_from_tool_call: str | None = None
 
     async def stream_agent_response(
         self, agent_stream: AsyncGenerator[Any, None]
@@ -45,8 +46,8 @@ class StreamingContext:
             if isinstance(event, RawResponsesStreamEvent):
                 # Handle different types of response events
                 from openai.types.responses import (
-                    ResponseTextDeltaEvent,
                     ResponseCompletedEvent,
+                    ResponseTextDeltaEvent,
                 )
                 from openai.types.responses.response_created_event import (
                     ResponseCreatedEvent,
@@ -82,8 +83,8 @@ class StreamingContext:
                                     first_output.finish_reason
                                 )
 
-                    # For completed responses, we also need to process the full response content
-                    # In case it wasn't streamed in deltas
+                    # For completed responses, we also need to process the full
+                    # response content in case it wasn't streamed in deltas
                     if (
                         event.data.response.output
                         and len(event.data.response.output) > 0
@@ -92,8 +93,12 @@ class StreamingContext:
                         if hasattr(first_output, "content") and first_output.content:
                             for content_item in first_output.content:
                                 if hasattr(content_item, "text") and content_item.text:
-                                    # Only process if we haven't received this content via deltas
-                                    if not self.llm_response_fully_collected_text_for_log:
+                                    # Only process if we haven't received this content
+                                    # via deltas
+                                    collected = (
+                                        self.llm_response_fully_collected_text_for_log
+                                    )
+                                    if not collected:
                                         await self.process_chunk(content_item.text)
                 elif isinstance(event.data, ResponseCreatedEvent):
                     # Handle response created events (initial response setup)
@@ -154,7 +159,10 @@ class StreamingContext:
                 "Stream ended without valid HTTP headers",
                 extra={
                     "client_address": self.client_address_str,
-                    "buffer_snippet": f"{self.body_buffer[:500]}{'...' if len(self.body_buffer) > 500 else ''}",
+                    "buffer_snippet": (
+                        f"{self.body_buffer[:500]}"
+                        f"{'...' if len(self.body_buffer) > 500 else ''}"
+                    ),
                 },
             )
 
@@ -191,10 +199,18 @@ class StreamingContext:
                         new_id = args.get("session_id")
                         if new_id:
                             app_logger.info(
-                                "Session ID assigned via tool call",
+                                "Session ID assigned via tool call, setting cookie.",
                                 extra={"session_id": new_id},
                             )
-                            return new_id
+                            self.session_id_from_tool_call = new_id
+                            # Set the cookie directly on the response object
+                            self.response.set_cookie(
+                                "session_id",
+                                new_id,
+                                httponly=True,
+                                samesite="Lax",
+                                path="/",
+                            )
         return None
 
     async def process_chunk(self, chunk: str):
@@ -223,7 +239,10 @@ class StreamingContext:
                         "Parsing HTTP headers from LLM",
                         extra={
                             "client_address": self.client_address_str,
-                            "header_snippet": f"{header_section[:200]}{'...' if len(header_section) > 200 else ''}",
+                            "header_snippet": (
+                                f"{header_section[:200]}"
+                                f"{'...' if len(header_section) > 200 else ''}"
+                            ),
                         },
                     )
                     await self._parse_and_prepare_response(
@@ -256,10 +275,8 @@ class StreamingContext:
             # Handle both \r\n and \n line endings
             if "\r\n" in header_section:
                 lines = header_section.split("\r\n")
-                separator_used = "\r\n"
             else:
                 lines = header_section.split("\n")
-                separator_used = "\n"
 
             status_line = lines[0]
 
@@ -321,7 +338,8 @@ class StreamingContext:
 
 class LLMResponseStreamer:
     """
-    A streaming response handler that processes LLM output and converts it to HTTP responses.
+    A streaming response handler that processes LLM output and converts it to
+    HTTP responses.
     """
 
     def __init__(self, client_address_str: str):
@@ -332,7 +350,7 @@ class LLMResponseStreamer:
         request: web.Request,
         agent_stream: AsyncGenerator[Any, None],
         max_turns: int,
-        session_id_from_cookie: str | None,
+        session_id: str | None,
     ) -> tuple[web.StreamResponse, str | None, dict[str, Any]]:
         """
         Process the agent stream and return the response with metrics.
@@ -353,8 +371,6 @@ class LLMResponseStreamer:
         metrics["llm_first_token_time"] = context.llm_first_token_time
         metrics["llm_stream_end_time"] = context.llm_stream_end_time
 
-        # For now, return the original session_id_from_cookie as final_session_id_for_turn
-        # This can be enhanced later to handle session ID changes from tool calls
-        final_session_id_for_turn = session_id_from_cookie
+        final_session_id_for_turn = context.session_id_from_tool_call or session_id
 
         return response, final_session_id_for_turn, metrics
