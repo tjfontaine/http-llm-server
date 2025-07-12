@@ -1,15 +1,48 @@
 ---
-description: 
-globs: 
+description:
+globs:
 alwaysApply: true
 ---
+
 - Use `uv` for managing Python dependencies and running scripts.
 - For installing dependencies, use `uv pip install <package_name>`.
-- To install dependencies from `pyproject.toml` (or `requirements.txt`), use `uv pip sync pyproject.toml`.
-- To run scripts defined in `pyproject.toml`, use `uv run <script_name>`. For example, `uv run start_server`.
+- To install dependencies from `pyproject.toml` (or `requirements.txt`), use
+  `uv pip sync pyproject.toml`.
+- To run scripts defined in `pyproject.toml`, use `uv run <script_name>`.
 - Keep `pyproject.toml` updated with all project dependencies.
-- Use `ruff` for linting Python code.
-- Use `ruff format` for formatting Python code.
+- Use `uv run ruff` for linting and formatting Python code.
 - Adhere to PEP 8 and other standard Python style guides enforced by `ruff`.
-- Run `ruff check --fix .` to lint and automatically fix issues.
-- Run `ruff format .` to format all Python files in the project.
+- Run `uv run ruff check --fix .` to lint and automatically fix issues.
+- Run `uv run ruff format .` to format all Python files in the project.
+- After making changes, run `uv run main.py --one_shot=True` to ensure
+  everything is working.
+- The `vendor/` directory contains vendored dependencies that should NOT be
+  modified directly by the assistant.
+- Files in the `vendor/` directory should be treated as read-only, similar to
+  `.venv` files.
+- The assistant should read and analyze vendor code to understand functionality
+  with precision, confirm the correct path forward, and avoid making incorrect
+  assumptions.
+- NEVER overwrite, modify, or delete files in the `vendor/` directory.
+- Use vendor code as reference material to understand how dependencies work and
+  how to properly integrate with them.
+- When suggesting changes that involve vendor dependencies, focus on modifying
+  the project's own code to work with the vendor code, not modifying the vendor
+  code itself.
+- The assistant should prefer reading vendor source code over making assumptions
+  about dependency behavior.
+- The `.venv/` directory contains installed Python dependencies that should NOT
+  be modified directly by the assistant.
+- Files in the `.venv/` directory should be treated as read-only for
+  understanding purposes only.
+- The assistant should read and analyze .venv code to understand functionality
+  with precision, confirm the correct path forward, and avoid making incorrect
+  assumptions.
+- NEVER overwrite, modify, or delete files in the `.venv/` directory.
+- Use .venv code as reference material to understand how installed dependencies
+  work and how to properly integrate with them.
+- When suggesting changes that involve dependencies, focus on modifying the
+  project's own code or dependency management files (like pyproject.toml), not
+  modifying the installed packages directly.
+- The assistant should prefer reading dependency source code over making
+  assumptions about package behavior.
