@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 
 from agents import (
     Agent,
-    Runner,
     AsyncOpenAI,
     OpenAIChatCompletionsModel,
+    Runner,
     set_tracing_disabled,
 )
 from agents.mcp import MCPServerStdio
@@ -27,9 +27,8 @@ async def wait_for_server(base_url: str, timeout: int = 10) -> bool:
     # Use dedicated health check endpoint for faster, lightweight checks
     health_check_url = f"{base_url}/_health_check"
     checks = timeout // 2
-    app_logger.info(
-        f"Waiting for server readiness using {health_check_url}, will check {checks} times every 2 seconds..."
-    )
+    app_logger.info(f"Waiting for server readiness at {health_check_url}...")
+    app_logger.info(f"Will check {checks} times every 2 seconds.")
 
     for i in range(checks):
         try:
@@ -156,7 +155,9 @@ async def main():
                         app_logger.debug(f"Agent tool: {item.name}")
                     if hasattr(item, "content") and item.content:
                         app_logger.debug(
-                            f"Tool result: {item.content[:200]}{'...' if len(str(item.content)) > 200 else ''}"
+                            "Tool result: %.200s%s",
+                            item.content,
+                            "..." if len(str(item.content)) > 200 else "",
                         )
 
             if event.type == "final_output":
@@ -165,32 +166,22 @@ async def main():
 
         # If one-shot mode, check server readiness then make one test request
         if config.one_shot:
-            app_logger.info(
-                "One-shot mode: Checking server readiness then making single test request..."
-            )
-
-            # Simple delay to allow server to start up
-            app_logger.debug("Waiting 3 seconds for web server to start...")
-            await asyncio.sleep(3)
-
-            # Check server readiness using health check endpoint
-            base_url = f"http://localhost:{config.port}"
-            server_ready = await wait_for_server(base_url, timeout=20)
-
-            if not server_ready:
-                app_logger.error(f"Server at {base_url} never became ready")
-                return
+            app_logger.info("One-shot mode: Checking server readiness...")
+            app_logger.info("Making single test request...")
+            await asyncio.sleep(2)  # Give the server a moment to be ready
+            await wait_for_server(f"http://localhost:{config.port}", timeout=20)
 
             try:
                 app_logger.info(
-                    f"Server is ready! Making single test request to {base_url}/"
+                    f"Server is ready! Making single test request to http://localhost:{config.port}/"
                 )
 
                 import aiohttp
 
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        f"{base_url}/", timeout=aiohttp.ClientTimeout(total=30)
+                        f"http://localhost:{config.port}/",
+                        timeout=aiohttp.ClientTimeout(total=30),
                     ) as response:
                         response_text = await response.text()
 

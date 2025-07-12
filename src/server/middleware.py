@@ -29,9 +29,8 @@ This module provides middlewares for:
 - Error handling (LLM-generated error responses)
 """
 
-import http.cookies
 import time
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 
 from aiohttp import web
 
@@ -40,6 +39,8 @@ from .errors import send_llm_error_response_aiohttp
 
 # Get loggers for consistent logging throughout the application
 app_logger, access_logger, _ = get_loggers()
+
+EMPTY_RESPONSE_STREAMED = "[LLM_EMPTY_RESPONSE_STREAMED]"
 
 
 def logging_and_metrics_middleware():
@@ -58,134 +59,156 @@ def logging_and_metrics_middleware():
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
         start_time = time.perf_counter()
-        client_address_tuple = request.transport.get_extra_info("peername")
-        client_address_str = (
-            f"{client_address_tuple[0]}:{client_address_tuple[1]}"
-            if client_address_tuple
-            else "Unknown Client"
-        )
-
-        # Store timing data on request for use by handler
-        request["start_time"] = start_time
+        client_address_str = f"{request.remote}"
         request["client_address_str"] = client_address_str
-
         access_logger.info(
-            f"[{client_address_str}] Incoming request: {request.method} {request.path_qs}"
+            f"[{client_address_str}] Incoming: {request.method} {request.path_qs}"
         )
 
-        response = await handler(request)
+        try:
+            response = await handler(request)
 
-        # Extract metrics from request context (set by handler or other middleware)
-        llm_first_token_time = request.get("llm_first_token_time")
-        llm_stream_end_time = request.get("llm_stream_end_time")
-        llm_call_start_time = request.get("llm_call_start_time")
-        llm_response_fully_collected_text_for_log = request.get(
-            "llm_response_fully_collected_text_for_log", ""
-        )
-        model_error_indicator_for_recording = request.get(
-            "model_error_indicator_for_recording"
-        )
-        last_chunk_finish_reason = request.get("last_chunk_finish_reason")
-        prompt_tokens_from_usage = request.get("prompt_tokens_from_usage", 0)
-        completion_tokens_from_usage = request.get("completion_tokens_from_usage", 0)
-        final_session_id_for_turn = request.get("final_session_id_for_turn")
-        session_id_from_cookie = request.get("session_id_from_cookie")
-
-        # Calculate performance metrics
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        ttft_str = "N/A"
-        duration_llm_stream_str = "N/A"
-
-        llm_ttft_seconds_val = None
-        if llm_call_start_time and llm_first_token_time:
-            ttft_calc = llm_first_token_time - llm_call_start_time
-            if ttft_calc >= 0:
-                llm_ttft_seconds_val = ttft_calc
-                ttft_str = f"{llm_ttft_seconds_val:.3f}s"
-
-        llm_stream_duration_seconds_val = None
-        if llm_call_start_time and llm_stream_end_time:
-            duration_llm_calc = llm_stream_end_time - llm_call_start_time
-            if duration_llm_calc >= 0:
-                llm_stream_duration_seconds_val = duration_llm_calc
-                duration_llm_stream_str = f"{llm_stream_duration_seconds_val:.3f}s"
-
-        compl_tokens_per_sec_str = "N/A"
-        compl_tokens_per_sec_val = None
-        if llm_stream_duration_seconds_val is not None:
-            if llm_stream_duration_seconds_val > 0:
-                if completion_tokens_from_usage > 0:
-                    tokens_per_sec = (
-                        completion_tokens_from_usage / llm_stream_duration_seconds_val
-                    )
-                    compl_tokens_per_sec_str = f"{tokens_per_sec:.2f}"
-                    compl_tokens_per_sec_val = tokens_per_sec
-                else:
-                    compl_tokens_per_sec_str = "0.00 (no tokens)"
-                    compl_tokens_per_sec_val = 0.0
-            elif llm_stream_duration_seconds_val == 0:
-                if completion_tokens_from_usage > 0:
-                    compl_tokens_per_sec_str = "Infinity"
-                    compl_tokens_per_sec_val = float("inf")
-                else:
-                    compl_tokens_per_sec_str = "0.00 (no tokens, instantaneous)"
-                    compl_tokens_per_sec_val = 0.0
-
-        # Debug timing and response characteristics
-        app_logger.debug(
-            f"[{client_address_str}] Request processing complete",
-            extra={
-                "total_duration": f"{duration:.3f}s",
-                "llm_ttft": ttft_str,
-                "llm_stream_duration": duration_llm_stream_str,
-                "tokens_per_second": compl_tokens_per_sec_str,
-                "response_size_chars": len(llm_response_fully_collected_text_for_log),
-                "session_id": final_session_id_for_turn or "none",
-                "had_errors": bool(model_error_indicator_for_recording),
-            },
-        )
-
-        access_log_extra = {
-            "remote_address": client_address_str,
-            "total_duration_seconds": round(duration, 3),
-            "llm_ttft_seconds": round(llm_ttft_seconds_val, 3)
-            if llm_ttft_seconds_val is not None
-            else None,
-            "llm_stream_duration_seconds": round(llm_stream_duration_seconds_val, 3)
-            if llm_stream_duration_seconds_val is not None
-            else None,
-            "prompt_tokens": prompt_tokens_from_usage,
-            "completion_tokens": completion_tokens_from_usage,
-            "completion_tokens_per_second": round(compl_tokens_per_sec_val, 2)
-            if compl_tokens_per_sec_val is not None
-            and compl_tokens_per_sec_val != float("inf")
-            else compl_tokens_per_sec_val,
-            "session_hkey": final_session_id_for_turn,
-            "session_log_id": final_session_id_for_turn,
-            "new_session_by_server": final_session_id_for_turn
-            != session_id_from_cookie,
-            "http_method": request.method,
-            "http_path_qs": request.path_qs,
-            "llm_finish_reason": last_chunk_finish_reason,
-        }
-
-        log_msg_final = f"[{client_address_str}] Request handled. "
-        log_msg_final += f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, LLM_StreamDur: {duration_llm_stream_str}, "
-        log_msg_final += f"PToken: {prompt_tokens_from_usage}, CToken: {completion_tokens_from_usage}, CTPS: {compl_tokens_per_sec_str}, "
-        log_msg_final += f"Sess: {final_session_id_for_turn}, "
-        log_msg_final += f"FinishReason: {last_chunk_finish_reason if last_chunk_finish_reason else 'N/A'}."
-
-        if model_error_indicator_for_recording:
-            access_log_extra["error_indicator"] = model_error_indicator_for_recording
-            access_log_extra["llm_raw_response_on_error"] = (
-                llm_response_fully_collected_text_for_log
+            # Extract metrics from request context (set by handler or other middleware)
+            llm_first_token_time = request.get("llm_first_token_time")
+            llm_stream_end_time = request.get("llm_stream_end_time")
+            llm_call_start_time = request.get("llm_call_start_time")
+            llm_response_fully_collected_text_for_log = request.get(
+                "llm_response_fully_collected_text_for_log", ""
             )
-            log_msg_final += f" Error: {model_error_indicator_for_recording}."
+            model_error_indicator_for_recording = request.get(
+                "model_error_indicator_for_recording"
+            )
+            last_chunk_finish_reason = request.get("last_chunk_finish_reason")
+            prompt_tokens_from_usage = request.get("prompt_tokens_from_usage", 0)
+            completion_tokens_from_usage = request.get(
+                "completion_tokens_from_usage", 0
+            )
+            final_session_id_for_turn = request.get("final_session_id_for_turn")
+            session_id_from_cookie = request.get("session_id_from_cookie")
 
-        access_logger.info(log_msg_final, extra=access_log_extra)
+            # Calculate performance metrics
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            ttft_str = "N/A"
+            duration_llm_stream_str = "N/A"
 
-        return response
+            llm_ttft_seconds_val = None
+            if llm_call_start_time and llm_first_token_time:
+                ttft_calc = llm_first_token_time - llm_call_start_time
+                if ttft_calc >= 0:
+                    llm_ttft_seconds_val = ttft_calc
+                    ttft_str = f"{llm_ttft_seconds_val:.3f}s"
+
+            llm_stream_duration_seconds_val = None
+            if llm_call_start_time and llm_stream_end_time:
+                duration_llm_calc = llm_stream_end_time - llm_call_start_time
+                if duration_llm_calc >= 0:
+                    llm_stream_duration_seconds_val = duration_llm_calc
+                    duration_llm_stream_str = f"{llm_stream_duration_seconds_val:.3f}s"
+
+            compl_tokens_per_sec_str = "N/A"
+            compl_tokens_per_sec_val = None
+            if llm_stream_duration_seconds_val is not None:
+                if llm_stream_duration_seconds_val > 0:
+                    if completion_tokens_from_usage > 0:
+                        tokens_per_sec = (
+                            completion_tokens_from_usage
+                            / llm_stream_duration_seconds_val
+                        )
+                        compl_tokens_per_sec_str = f"{tokens_per_sec:.2f}"
+                        compl_tokens_per_sec_val = tokens_per_sec
+                    else:
+                        compl_tokens_per_sec_str = "0.00 (no tokens)"
+                        compl_tokens_per_sec_val = 0.0
+                elif llm_stream_duration_seconds_val == 0:
+                    if completion_tokens_from_usage > 0:
+                        compl_tokens_per_sec_str = "Infinity"
+                        compl_tokens_per_sec_val = float("inf")
+                    else:
+                        compl_tokens_per_sec_str = "0.00 (no tokens, instantaneous)"
+                        compl_tokens_per_sec_val = 0.0
+
+            # Debug timing and response characteristics
+            app_logger.debug(
+                f"[{client_address_str}] Request processing complete",
+                extra={
+                    "total_duration": f"{duration:.3f}s",
+                    "llm_ttft": ttft_str,
+                    "llm_stream_duration": duration_llm_stream_str,
+                    "tokens_per_second": compl_tokens_per_sec_str,
+                    "response_size_chars": len(
+                        llm_response_fully_collected_text_for_log or ""
+                    ),
+                    "session_id": final_session_id_for_turn or "none",
+                    "had_errors": bool(model_error_indicator_for_recording),
+                    "finish_reason": last_chunk_finish_reason or "none",
+                },
+            )
+
+            access_log_extra = {
+                "remote_address": client_address_str,
+                "total_duration_seconds": round(duration, 3),
+                "llm_ttft_seconds": round(llm_ttft_seconds_val, 3)
+                if llm_ttft_seconds_val is not None
+                else None,
+                "llm_stream_duration_seconds": round(llm_stream_duration_seconds_val, 3)
+                if llm_stream_duration_seconds_val is not None
+                else None,
+                "prompt_tokens": prompt_tokens_from_usage,
+                "completion_tokens": completion_tokens_from_usage,
+                "completion_tokens_per_second": round(compl_tokens_per_sec_val, 2)
+                if compl_tokens_per_sec_val is not None
+                and compl_tokens_per_sec_val != float("inf")
+                else compl_tokens_per_sec_val,
+                "session_hkey": final_session_id_for_turn,
+                "session_log_id": final_session_id_for_turn,
+                "new_session_by_server": final_session_id_for_turn
+                != session_id_from_cookie,
+                "http_method": request.method,
+                "http_path_qs": request.path_qs,
+                "llm_finish_reason": last_chunk_finish_reason,
+            }
+
+            log_msg_final = f"[{client_address_str}] Request handled. "
+            log_msg_final += f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, "
+            log_msg_final += f"LLM_StreamDur: {duration_llm_stream_str}, "
+            log_msg_final += f"PToken: {prompt_tokens_from_usage}, "
+            log_msg_final += f"CToken: {completion_tokens_from_usage}, "
+            log_msg_final += f"CTPS: {compl_tokens_per_sec_str}, "
+            log_msg_final += f"Sess: {final_session_id_for_turn}, "
+            log_msg_final += (
+                f"FinishReason: "
+                f"{last_chunk_finish_reason if last_chunk_finish_reason else 'N/A'}."
+            )
+
+            if model_error_indicator_for_recording:
+                log_msg_final += " [MODEL_ERROR]"
+                access_log_extra["error_indicator"] = (
+                    model_error_indicator_for_recording
+                )
+                access_log_extra["llm_raw_response_on_error"] = (
+                    llm_response_fully_collected_text_for_log
+                )
+
+            access_logger.info(log_msg_final, extra=access_log_extra)
+
+            return response
+        except Exception as e:
+            app_logger.exception(
+                f"[{client_address_str}] Unhandled exception in request handler: {e}"
+            )
+
+            # Store error information for logging middleware
+            request["model_error_indicator_for_recording"] = "UNHANDLED_EXCEPTION"
+            request["llm_response_fully_collected_text_for_log"] = f"ERROR: {str(e)}"
+
+            return await send_llm_error_response_aiohttp(
+                request,
+                request.app["agent"],
+                500,
+                "Internal Server Error",
+                f"An unexpected error occurred: {str(e)}",
+            )
 
     return middleware
 
@@ -206,21 +229,27 @@ def session_middleware():
         client_address_str = request.get("client_address_str", "Unknown Client")
 
         session_id_from_cookie = None
-        cookie_header = request.headers.get("Cookie")
-        if cookie_header:
+        if "Cookie" in request.headers:
+            cookie_header = request.headers["Cookie"]
             try:
-                cookies = http.cookies.SimpleCookie()
-                cookies.load(cookie_header)
-                if "X-Chat-Session-ID" in cookies:
-                    session_id_from_cookie = cookies["X-Chat-Session-ID"].value
+                # Basic parsing, not a full cookie parser
+                if "session_id" in cookie_header:
+                    session_id_from_cookie = cookie_header.split("session_id=")[
+                        1
+                    ].split(";")[0]
                     if session_id_from_cookie:
                         app_logger.info(
-                            f"[{client_address_str}] Existing session ID found in cookie: {session_id_from_cookie}"
+                            f"[{client_address_str}] Existing session ID from cookie: "
+                            f"{session_id_from_cookie}"
                         )
             except Exception:
                 app_logger.exception(
-                    f"[{client_address_str}] Error parsing 'Cookie' header: '{cookie_header}'. Treating as no session."
+                    f"[{client_address_str}] Error parsing 'Cookie' header: "
+                    f"'{cookie_header}'. Treating as no session."
                 )
+
+        # Determine the final session ID for this turn
+        session_id = request.get("session_id_for_turn") or session_id_from_cookie
 
         # Store session information on request
         request["session_id_from_cookie"] = session_id_from_cookie
@@ -229,13 +258,11 @@ def session_middleware():
         current_session_store = request.app["session_store"]
         request["session_store"] = current_session_store
 
-        if session_id_from_cookie:
+        if session_id:
             # Load session data
-            full_history = await current_session_store.get_history(
-                session_id_from_cookie
-            )
+            full_history = await current_session_store.get_history(session_id)
             current_token_count = await current_session_store.get_token_count(
-                session_id_from_cookie
+                session_id
             )
 
             # Attach session data to request
@@ -286,6 +313,7 @@ def error_handling_middleware():
 
             return await send_llm_error_response_aiohttp(
                 request,
+                request.app["agent"],
                 500,
                 "Internal Server Error",
                 f"An unexpected error occurred: {str(e)}",
@@ -298,8 +326,8 @@ def session_cleanup_middleware():
     """
     Middleware factory for session cleanup after request processing.
 
-    Records conversation turns and updates token counts after the main handler completes.
-    This runs after the handler but before the logging middleware.
+    Records conversation turns and updates token counts after the main handler
+    completes. This runs after the handler but before the logging middleware.
     """
 
     @web.middleware
@@ -330,9 +358,13 @@ def session_cleanup_middleware():
 
             assistant_content_for_history = llm_response_fully_collected_text_for_log
             if model_error_indicator_for_recording:
-                assistant_content_for_history = f"[LLM_RESPONSE_STREAM_INTERRUPTED_OR_ERROR: {model_error_indicator_for_recording}]\n\n{llm_response_fully_collected_text_for_log}"
+                interrupted = model_error_indicator_for_recording
+                llm_response_fully_collected_text_for_log = (
+                    f"[MODEL_INTERRUPTED_OR_ERROR: {interrupted}]\n\n"
+                    f"{llm_response_fully_collected_text_for_log}"
+                )
             elif not llm_response_fully_collected_text_for_log.strip():
-                assistant_content_for_history = "[LLM_EMPTY_RESPONSE_STREAMED]"
+                llm_response_fully_collected_text_for_log = EMPTY_RESPONSE_STREAMED
 
             await session_store.record_turn(
                 final_session_id_for_turn,
@@ -343,11 +375,12 @@ def session_cleanup_middleware():
                 await session_store.update_token_count(
                     final_session_id_for_turn, prompt_tokens_from_usage
                 )
-        elif not final_session_id_for_turn:
-            app_logger.error(
-                f"[{client_address_str}] Could not determine session ID for saving conversation turn. "
-                "LLM may have failed to create a session or set a cookie."
-            )
+            elif not final_session_id_for_turn:
+                app_logger.error(
+                    f"[{client_address_str}] Could not determine session ID for "
+                    "saving conversation turn. LLM may have failed to create a "
+                    "session or set a cookie."
+                )
 
         return response
 

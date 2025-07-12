@@ -81,7 +81,10 @@ class McpSessionStore:
             return False
 
     async def delete_session(self, session_id: str) -> bool:
-        """Delete all session data for the given session ID. Returns True if session existed."""
+        """
+        Delete all session data for the given session ID.
+        Returns True if session existed.
+        """
         if not session_id:
             return False
 

@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from rich.logging import RichHandler
 
@@ -25,34 +25,26 @@ _STANDARD_LOG_RECORD_KEYS = set(
 class EnhancedStructuredFormatter(logging.Formatter):
     """Enhanced formatter for consistent, structured logging with rich information."""
 
-    def format(self, record):
-        """Formats the log record to include structured extra fields."""
-        # Add structured fields to the record
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    def format(self, record: logging.LogRecord) -> str:
+        timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
         level_name = record.levelname
         logger_name = record.name
-
-        # Extract extra fields passed to the logger
         extra_items = {
             k: v
             for k, v in record.__dict__.items()
-            if k not in _STANDARD_LOG_RECORD_KEYS
+            if k not in logging.LogRecord.__dict__
         }
 
-        # Create a structured log message
         if extra_items:
             extra_info = " ".join(f"{k}={v}" for k, v in extra_items.items())
-            message = f"[{timestamp}] {level_name:8} {logger_name:20} | {record.getMessage()} | {extra_info}"
+            message = (
+                f"[{timestamp}] {level_name:8} {logger_name:20} | "
+                f"{record.getMessage()} | {extra_info}"
+            )
         else:
             message = (
                 f"[{timestamp}] {level_name:8} {logger_name:20} | {record.getMessage()}"
             )
-
-        # Add exception info if present
-        if record.exc_info and not record.exc_text:
-            record.exc_text = self.formatException(record.exc_info)
-        if record.exc_text:
-            message += f"\n{record.exc_text}"
 
         return message
 

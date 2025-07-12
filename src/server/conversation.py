@@ -11,7 +11,10 @@ import logging
 import os
 from weakref import WeakValueDictionary
 
-from .models import ConversationHistory
+from src.logging_config import get_loggers
+from src.server.models import ChatMessage, ConversationHistory
+
+_conversation_logger, _, _ = get_loggers()
 
 
 class HttpConversationStore:
@@ -62,38 +65,41 @@ class HttpConversationStore:
         async with session_lock:
             return self._histories.get(session_id, ConversationHistory())
 
-    async def record_turn(self, session_id: str, role: str, text_content: str) -> None:
-        """Record a new turn in the conversation history for a given session ID."""
+    async def record_turn(self, session_id: str, turn: ChatMessage):
+        """Records a single turn in the conversation history for a given session."""
         if not session_id:
             self._logger.warning(
-                "Attempted to record HTTP conversation turn without a session_id. Turn not stored."
+                "Attempted to record turn without session_id. Not stored."
             )
             return
 
-        session_lock = await self._get_session_lock(session_id)
-        async with session_lock:
-            history = self._histories.setdefault(session_id, ConversationHistory())
-            history.add_message(role=role, content=text_content)
-            self._conversation_logger.info(
-                f"Recorded '{role}' turn for session_id '{session_id}' in HTTP conversation store. Total turns: {len(history.messages)}"
-            )
-
-    async def replace_history(
-        self, session_id: str, history: ConversationHistory
-    ) -> None:
-        """Replace the entire conversation history for a given session ID."""
-        if not session_id:
-            self._logger.warning(
-                "Attempted to replace HTTP conversation history without a session_id. History not replaced."
-            )
-            return
-
-        session_lock = await self._get_session_lock(session_id)
-        async with session_lock:
-            self._histories[session_id] = history
-            self._token_counts[session_id] = 0  # Reset token count
+        with self._lock:
+            history = self._get_or_create_history(session_id)
+            history.add_turn(role=turn.role, content=turn.content)
             self._logger.info(
-                f"Replaced HTTP conversation history for session '{session_id}'. New history has {len(history.messages)} turn(s). Token count reset."
+                "Recorded turn for session '%s'. Total turns: %d",
+                session_id,
+                len(history.messages),
+            )
+
+    async def replace_history(self, session_id: str, history: ConversationHistory):
+        """Replaces the entire conversation history for a given session."""
+        if not session_id:
+            self._logger.warning(
+                "Attempted to replace history without session_id. Not replaced."
+            )
+            return
+
+        with self._lock:
+            self._histories[session_id] = history
+            # Reset the token count since history is being overwritten
+            if session_id in self._token_counts:
+                del self._token_counts[session_id]
+            self._logger.info(
+                "Replaced history for session '%s'. New history has %d turn(s). "
+                "Token count reset.",
+                session_id,
+                len(history.messages),
             )
 
     async def get_token_count(self, session_id: str) -> int:
@@ -102,89 +108,65 @@ class HttpConversationStore:
         async with session_lock:
             return self._token_counts.get(session_id, 0)
 
-    async def update_token_count(self, session_id: str, count: int) -> None:
-        """Update the token count for the session's history."""
+    async def update_token_count(self, session_id: str, count: int):
+        """Updates the token count for a given session."""
         if not session_id:
             return
-
-        session_lock = await self._get_session_lock(session_id)
-        async with session_lock:
+        with self._lock:
             self._token_counts[session_id] = count
             self._logger.info(
-                f"Updated token count for session '{session_id}' to {count} in HTTP conversation store."
+                "Updated token count for session '%s' to %d in store.",
+                session_id,
+                count,
             )
 
     async def save_all_sessions_on_shutdown(self, log_directory: str) -> None:
-        """Save all current session histories to files on server shutdown."""
+        """Saves all conversation histories to disk."""
         if not self._save_to_disk:
             self._logger.info(
-                "HTTP conversation saving to disk is disabled. Skipping save_all_sessions_on_shutdown."
+                "Conversation saving to disk is disabled. Skipping shutdown save."
             )
             return
 
         try:
             os.makedirs(log_directory, exist_ok=True)
-            self._logger.info(
-                f"Ensured HTTP conversation log directory exists: {log_directory}"
-            )
-
-            # For shutdown, we need to acquire all session locks to ensure consistency
-            # First, get a snapshot of all session IDs
-            async with self._locks_manager_lock:
-                session_ids = list(self._histories.keys())
-
-            # Acquire locks for all sessions in sorted order to avoid deadlocks
-            session_locks = []
-            for session_id in sorted(session_ids):
-                session_lock = await self._get_session_lock(session_id)
-                session_locks.append((session_id, session_lock))
-
-            # Acquire all locks in order
-            acquired_locks = []
-            try:
-                for session_id, session_lock in session_locks:
-                    await session_lock.acquire()
-                    acquired_locks.append(session_lock)
-
-                # Now we have exclusive access to all sessions
-                if not self._histories:
-                    self._logger.info("No HTTP conversation histories to save.")
-                    return
-
+            with self._lock:
                 saved_count = 0
                 for session_id, history_obj in self._histories.items():
-                    if not history_obj.messages:
-                        continue
                     file_path = os.path.join(log_directory, f"{session_id}.json")
                     try:
-                        # Using standard open for simplicity; can be replaced with aiofiles if it becomes a bottleneck.
+                        # Using standard open; can be replaced with aiofiles
+                        # if it becomes a bottleneck.
                         with open(file_path, "w") as f:
                             json.dump(history_obj.model_dump(), f, indent=2)
                         self._logger.info(
-                            f"HTTP conversation history for session '{session_id}' saved to {file_path}"
+                            "HTTP conversation for session '%s' saved to %s",
+                            session_id,
+                            file_path,
                         )
                         saved_count += 1
                     except Exception as e:
                         self._logger.exception(
-                            f"Failed to save HTTP conversation history for session '{session_id}' to {file_path}: {e}"
+                            "Failed to save history for session '%s' to %s: %s",
+                            session_id,
+                            file_path,
+                            e,
                         )
                 if saved_count > 0:
                     self._logger.info(
-                        f"Successfully saved {saved_count} HTTP conversation histories."
+                        f"Successfully saved {saved_count} HTTP conversation(s)."
                     )
-                else:
-                    self._logger.info(
-                        "No non-empty HTTP conversation histories were saved."
-                    )
-            finally:
-                # Release all acquired locks in reverse order
-                for session_lock in reversed(acquired_locks):
-                    session_lock.release()
-
         except Exception as e:
             self._logger.exception(
-                f"Failed to create/access HTTP conversation log directory '{log_directory}': {e}"
+                "Failed to create/access conversation log directory '%s': %s",
+                log_directory,
+                e,
             )
 
-        finally:
-            self._logger.info("HTTP conversation saving to disk completed.")
+    def _get_or_create_history(self, session_id: str) -> "ConversationHistory":
+        """Helper to get or create a history for a given session ID."""
+        history = self._histories.get(session_id)
+        if history is None:
+            history = ConversationHistory()
+            self._histories[session_id] = history
+        return history

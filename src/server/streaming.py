@@ -1,351 +1,337 @@
 # src/server/streaming.py
+import asyncio
 import json
-import logging
-import time
-from typing import Optional, Tuple
+from typing import Any, AsyncGenerator
 
-from agents.items import ToolCallItem
-from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
+from agents import Agent
+from agents.stream_events import RunItemStreamEvent, RawResponsesStreamEvent
+from agents.items import RunItem, ToolCallItem
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
-from openai.types.responses import ResponseFunctionToolCall
 
-from ..logging_config import get_loggers
+from src.logging_config import get_loggers
 
-app_logger, access_logger, conversation_logger = get_loggers()
+app_logger, _, _ = get_loggers()
 
 
-class LLMResponseStreamer:
-    """
-    Handles the complex streaming logic for LLM responses, including:
-    - Parsing streaming events from the agent
-    - Processing tool calls
-    - Parsing HTTP headers from LLM response
-    - Managing session state changes
-    - Collecting response text and usage statistics
-    """
-
-    def __init__(self, client_address_str: str):
-        self.client_address_str = client_address_str
-        self.reset_state()
-
-    def reset_state(self):
-        """Reset internal state for a new request."""
-        self.llm_first_token_time: Optional[float] = None
-        self.llm_stream_end_time: Optional[float] = None
+class StreamingContext:
+    def __init__(self, request: web.Request, agent: Agent):
+        self.request = request
+        self.agent = agent
+        self.response = web.StreamResponse()
+        self.client_address_str = f"{request.remote}"
+        self.body_buffer = ""
+        self.header_section = ""
+        self.headers_and_status_parsed = False
         self.llm_response_fully_collected_text_for_log = ""
-        self.model_error_indicator_for_recording: Optional[str] = None
-        self._last_chunk_finish_reason: Optional[str] = None
+        self.model_error_indicator_for_recording: str | None = None
+        self.separator = "\r\n\r\n"
+        self.llm_first_token_time: float | None = None
+        self.llm_stream_end_time: float | None = None
         self.prompt_tokens_from_usage = 0
         self.completion_tokens_from_usage = 0
-        self.headers_and_status_parsed = False
-        self.body_buffer = ""
+        self.total_tokens_from_usage = 0
+        self._last_chunk_finish_reason: str | None = None
 
-    async def stream_response(
-        self,
-        request: web.Request,
-        agent_stream,
-        max_turns: int,
-        initial_session_id: Optional[str] = None,
-    ) -> Tuple[web.StreamResponse, Optional[str], dict]:
-        """
-        Process the LLM agent stream and return the HTTP response.
-
-        Args:
-            request: The aiohttp request object
-            agent_stream: The streaming agent response
-            max_turns: Maximum conversation turns
-            initial_session_id: Initial session ID from cookie
-
-        Returns:
-            Tuple of (response, final_session_id, metrics_dict)
-        """
-        self.reset_state()
-
-        response = web.StreamResponse()
-        response.enable_chunked_encoding(chunk_size=None)
-        final_session_id_for_turn = initial_session_id
-
-        self.llm_first_token_time = time.perf_counter()
-
+    async def stream_agent_response(
+        self, agent_stream: AsyncGenerator[Any, None]
+    ) -> tuple[web.StreamResponse, dict[str, Any]]:
         # The core of this server: stream the agent's response.
-        # This loop processes events from the agent, including tool calls and content chunks.
-        # A key design element is that the LLM is expected to generate a raw HTTP response,
-        # which this server parses on-the-fly to construct a valid `aiohttp.web.Response`.
+        # This loop processes events from the agent, including tool calls and content
+        # chunks. A key design element is that the LLM is expected to generate a
+        # raw HTTP response, which this server parses on-the-fly to construct a
+        # valid `aiohttp.web.Response`.
         async for event in agent_stream.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
-                raw_chunk = event.data
-                if (
-                    hasattr(raw_chunk, "response")
-                    and hasattr(raw_chunk.response, "usage")
-                    and raw_chunk.response.usage
-                ):
-                    usage = raw_chunk.response.usage
-                    app_logger.info(
-                        f"[{self.client_address_str}] Usage found in stream chunk: {usage}"
-                    )
-                    self.prompt_tokens_from_usage += usage.input_tokens
-                    self.completion_tokens_from_usage += usage.output_tokens
-
-            if isinstance(event, RunItemStreamEvent):
-                # Only log meaningful stream events at DEBUG level
-                if event.name in [
-                    "tool_called",
-                    "tool_output",
-                    "message_output_created",
-                ]:
+                # Handle different types of response events
+                from openai.types.responses import ResponseTextDeltaEvent, ResponseCompletedEvent
+                from openai.types.responses.response_created_event import ResponseCreatedEvent
+                
+                if isinstance(event.data, ResponseTextDeltaEvent):
+                    # Handle text delta events (streaming content)
+                    if event.data.delta:
+                        await self.process_chunk(event.data.delta)
+                elif isinstance(event.data, ResponseCompletedEvent):
+                    # Handle completed response events (final response with usage info)
+                    if event.data.response.usage:
+                        usage = event.data.response.usage
+                        app_logger.info(
+                            "[%s] Usage in completed response: %s",
+                            self.client_address_str,
+                            usage,
+                        )
+                        self.prompt_tokens_from_usage += usage.input_tokens or 0
+                        self.completion_tokens_from_usage += usage.output_tokens or 0
+                        self.total_tokens_from_usage += usage.total_tokens or 0
+                        
+                        # Get finish reason from the first choice if available
+                        if event.data.response.output and len(event.data.response.output) > 0:
+                            first_output = event.data.response.output[0]
+                            if hasattr(first_output, 'finish_reason'):
+                                self._last_chunk_finish_reason = first_output.finish_reason
+                    
+                    # For completed responses, we also need to process the full response content
+                    # In case it wasn't streamed in deltas
+                    if event.data.response.output and len(event.data.response.output) > 0:
+                        first_output = event.data.response.output[0]
+                        if hasattr(first_output, 'content') and first_output.content:
+                            for content_item in first_output.content:
+                                if hasattr(content_item, 'text') and content_item.text:
+                                    # Only process if we haven't received this content via deltas
+                                    if not self.llm_response_fully_collected_text_for_log:
+                                        await self.process_chunk(content_item.text)
+                elif isinstance(event.data, ResponseCreatedEvent):
+                    # Handle response created events (initial response setup)
                     app_logger.debug(
-                        f"[{self.client_address_str}] Stream event: {event.name}",
-                        extra={"event_type": type(event.item).__name__},
+                        "[%s] Response created: %s",
+                        self.client_address_str,
+                        event.data.response.id,
                     )
-
+                # Handle other event types as needed
+                else:
+                    app_logger.debug(
+                        "[%s] Unhandled raw response event type: %s",
+                        self.client_address_str,
+                        type(event.data).__name__,
+                    )
+            elif isinstance(event, RunItemStreamEvent):
                 if event.name == "tool_called":
-                    final_session_id_for_turn = await self._handle_tool_call(
-                        event, final_session_id_for_turn
-                    )
+                    await self.handle_tool_calls(event.item)
 
-                if event.name in [
-                    "message_chunk_created",
-                    "message_output_created",
-                ]:
-                    chunk = self._extract_chunk_text(event.item)
-                    if chunk:
-                        await self._process_content_chunk(chunk, response, request)
-
-            else:
-                # For RawResponsesStreamEvent, extract useful information
-                if isinstance(
-                    event, RawResponsesStreamEvent
-                ) and app_logger.isEnabledFor(logging.DEBUG):
-                    # Look for finish reason, usage info, etc.
-                    if hasattr(event, "item") and hasattr(event.item, "raw_item"):
-                        raw_item = event.item.raw_item
-                        debug_info = {}
-                        if (
-                            hasattr(raw_item, "finish_reason")
-                            and raw_item.finish_reason
-                        ):
-                            debug_info["finish_reason"] = raw_item.finish_reason
-                        if hasattr(raw_item, "usage") and raw_item.usage:
-                            debug_info["tokens"] = (
-                                f"input:{raw_item.usage.input_tokens},output:{raw_item.usage.output_tokens}"
-                            )
-
-                        if debug_info:  # Only log if we have useful info
-                            app_logger.debug(
-                                f"[{self.client_address_str}] Stream metadata",
-                                extra=debug_info,
-                            )
-
-        self.llm_stream_end_time = time.perf_counter()
-
-        # Log final state for debugging
-        app_logger.debug(
-            f"[{self.client_address_str}] LLM stream ended",
-            extra={
-                "headers_parsed": self.headers_and_status_parsed,
-                "buffer_length": len(self.body_buffer),
-                "response_length": len(self.llm_response_fully_collected_text_for_log),
-            },
-        )
-
-        if not self.headers_and_status_parsed:
+        # After the stream finishes, handle any remaining buffered content
+        if not self.response.prepared:
             app_logger.warning(
-                f"[{self.client_address_str}] Stream ended without parsing headers. "
-                f"Response preview: '{self.llm_response_fully_collected_text_for_log[:200]}{'...' if len(self.llm_response_fully_collected_text_for_log) > 200 else ''}'"
+                "[%s] Stream finished but HTTP response headers were not finalized.",
+                self.client_address_str,
             )
 
-        # If the stream ends and we have a buffer that looks like a response
-        # but without the final separator, we process it as a headers-only response.
-        if not self.headers_and_status_parsed and self.body_buffer.strip().startswith(
-            "HTTP/"
-        ):
+            # Log the collected text for debugging purposes
+            log_text = self.llm_response_fully_collected_text_for_log
+            log_snippet = f"{log_text[:200]}{'...' if len(log_text) > 200 else ''}"
             app_logger.debug(
-                f"[{self.client_address_str}] Attempting to parse unparsed headers as headers-only response"
+                "[%s] Full text collected before parsing headers. Snippet: '%s'",
+                self.client_address_str,
+                log_snippet,
             )
-            # Treat the whole buffer as headers, with an empty body
-            await self._parse_and_prepare_response(
-                self.body_buffer, "", response, request
-            )
-        elif not self.headers_and_status_parsed:
+
+            # One last attempt to parse, in case headers arrived but no separator
+            if (
+                self.separator not in self.body_buffer
+                and self.body_buffer
+                and not self.header_section
+            ):
+                app_logger.debug(
+                    "[%s] Attempting to parse unparsed headers as headers-only "
+                    "response",
+                    self.client_address_str,
+                )
+                # Treat the whole buffer as headers, with an empty body
+                await self._parse_and_prepare_response(self.body_buffer, "")
+                self.body_buffer = ""  # Clear buffer as it's now processed
+
+        if not self.response.prepared:
             app_logger.error(
-                f"[{self.client_address_str}] Stream ended without valid HTTP headers. "
-                f"Buffer content: '{self.body_buffer[:500]}{'...' if len(self.body_buffer) > 500 else ''}'"
+                "[%s] Stream ended without valid HTTP headers. Buffer: '%.500s%s'",
+                self.client_address_str,
+                self.body_buffer,
+                "..." if len(self.body_buffer) > 500 else "",
             )
 
         # Prepare metrics dictionary
         metrics = {
-            "llm_response_fully_collected_text_for_log": self.llm_response_fully_collected_text_for_log,
-            "model_error_indicator_for_recording": self.model_error_indicator_for_recording,
+            "llm_response_fully_collected_text_for_log": (
+                self.llm_response_fully_collected_text_for_log
+            ),
+            "model_error_indicator_for_recording": (
+                self.model_error_indicator_for_recording
+            ),
             "_last_chunk_finish_reason": self._last_chunk_finish_reason,
             "prompt_tokens_from_usage": self.prompt_tokens_from_usage,
             "completion_tokens_from_usage": self.completion_tokens_from_usage,
-            "llm_first_token_time": self.llm_first_token_time,
-            "llm_stream_end_time": self.llm_stream_end_time,
+            "total_tokens_from_usage": self.total_tokens_from_usage,
         }
+        # Note: Removed set_tcp_cork call since StreamResponse doesn't have this method
+        return self.response, metrics
 
-        return response, final_session_id_for_turn, metrics
+    async def handle_tool_calls(self, item: RunItem):
+        app_logger.debug(
+            "[%s] Handling tool calls: %s",
+            self.client_address_str,
+            item,
+        )
+        if isinstance(item, ToolCallItem):
+            raw_tool_call = item.raw_item
+            if hasattr(raw_tool_call, "function"):
+                if raw_tool_call.function:
+                    if raw_tool_call.function.name == "assign_session_id":
+                        args = json.loads(raw_tool_call.function.arguments)
+                        new_id = args.get("session_id")
+                        if new_id:
+                            app_logger.info(
+                                "Session ID '%s' assigned via tool call. "
+                                "Adopting for logging.",
+                                new_id,
+                            )
+                            return new_id
+        return None
 
-    async def _handle_tool_call(
-        self, event: RunItemStreamEvent, current_session_id: Optional[str]
-    ) -> Optional[str]:
-        """Handle tool call events, particularly session ID assignment."""
-        # Type-safe check for tool calls
-        if isinstance(event.item, ToolCallItem) and isinstance(
-            event.item.raw_item, ResponseFunctionToolCall
-        ):
-            tool_call = event.item.raw_item
-            tool_name = tool_call.name
-            tool_args = {}
-            if tool_call.arguments:
-                try:
-                    tool_args = json.loads(tool_call.arguments)
-                except json.JSONDecodeError:
-                    app_logger.warning(
-                        f"Could not decode tool arguments: {tool_call.arguments}",
-                        extra={
-                            "tool_name": tool_name,
-                            "error": "Skipping tool call with no valid arguments",
-                        },
-                    )
-                    return current_session_id
-
-            # Log tool call with structured information
-            app_logger.debug(
-                f"[{self.client_address_str}] LLM calling tool: {tool_name}",
-                extra={
-                    "tool_name": tool_name,
-                    "args_count": len(tool_args),
-                    "key_args": str(
-                        {
-                            k: str(v)[:50] + ("..." if len(str(v)) > 50 else "")
-                            for k, v in list(tool_args.items())[:3]
-                        }
-                    )
-                    if tool_args
-                    else "none",
-                },
-            )
-
-            if tool_name == "assign_session_id":
-                new_id = tool_args.get("session_id")
-                if new_id:
-                    app_logger.info(
-                        f"Session ID '{new_id}' assigned via tool call. Adopting for logging."
-                    )
-                    return new_id
-
-        return current_session_id
-
-    def _extract_chunk_text(self, item) -> str:
-        """Extract text content from a stream item."""
-        chunk = ""
-        if hasattr(item, "chunk"):
-            if hasattr(item.chunk, "text"):
-                chunk = item.chunk.text
-        elif hasattr(item, "raw_item"):
-            if isinstance(item.raw_item.content, list):
-                for part in item.raw_item.content:
-                    if hasattr(part, "text"):
-                        chunk = part.text
-                        break
-            elif hasattr(item.raw_item, "content"):
-                chunk = str(item.raw_item.content)
-        return chunk
-
-    async def _parse_and_prepare_response(
-        self,
-        header_section: str,
-        body_part: str,
-        response: web.StreamResponse,
-        request: web.Request,
-    ):
-        """Parses the header section and prepares the aiohttp response."""
-        self.headers_and_status_parsed = True
-
-        lines = header_section.split("\n")
-        llm_status_code = 200
-        llm_headers = {}
-        if lines:
-            status_line = lines[0].strip()
-            if status_line.startswith("HTTP/"):
-                try:
-                    parts = status_line.split(" ", 2)
-                    if len(parts) >= 2:
-                        llm_status_code = int(parts[1])
-                except (ValueError, IndexError):
-                    app_logger.warning(f"Invalid status line: {status_line}")
-            for line in lines[1:]:
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    llm_headers[key.strip()] = value.strip()
-
-        response.set_status(llm_status_code)
-        for k, v in llm_headers.items():
-            # Let aiohttp manage chunking and content length.
-            # The LLM may incorrectly provide these headers.
-            if k.lower() not in ("content-length", "transfer-encoding"):
-                response.headers[k] = v
+    async def process_chunk(self, chunk: str):
+        # This method is crucial for on-the-fly parsing of the LLM's output.
+        # It buffers data, detects the header-body separator, and switches from
+        # parsing headers to streaming the body.
         try:
-            await response.prepare(request)
+            if not self.response.prepared:
+                # Buffer until we find the separator
+                self.body_buffer += chunk
+                self.llm_response_fully_collected_text_for_log += chunk
+                
+                # Check for both possible separators
+                separator_found = None
+                if self.separator in self.body_buffer:
+                    separator_found = self.separator
+                elif '\n\n' in self.body_buffer:
+                    separator_found = '\n\n'
+                
+                if separator_found:
+                    header_section, self.body_buffer = self.body_buffer.split(
+                        separator_found, 1
+                    )
+                    self.header_section = header_section
+                    app_logger.info(
+                        "[%s] Parsing HTTP headers from LLM. Header: '%.200s%s'",
+                        self.client_address_str,
+                        header_section,
+                        "..." if len(header_section) > 200 else "",
+                    )
+                    await self._parse_and_prepare_response(
+                        header_section, self.body_buffer
+                    )
+                else:
+                    app_logger.debug(
+                        "[%s] No header separator found yet, continuing to buffer",
+                        self.client_address_str,
+                    )
+            else:
+                # Once headers are parsed, stream the rest of the body
+                await self.response.write(chunk.encode("utf-8"))
+
         except (ClientConnectionResetError, ConnectionResetError):
             app_logger.warning(
-                f"[{self.client_address_str}] Client disconnected before headers could be sent."
+                "[%s] Client disconnected before response was complete.",
+                self.client_address_str,
             )
-            return
+            self.model_error_indicator_for_recording = "client_disconnected"
+            # Stop further processing by raising a special exception or by returning
+            raise asyncio.CancelledError("Client disconnected")
 
-        app_logger.debug(
-            f"[{self.client_address_str}] Parsed HTTP headers from LLM",
-            extra={
-                "status_code": llm_status_code,
-                "content_type": llm_headers.get("Content-Type", "unknown"),
-            },
-        )
-
-        if body_part:
-            try:
-                await response.write(body_part.encode("utf-8"))
-            except (ClientConnectionResetError, ConnectionResetError):
-                app_logger.warning(
-                    f"[{self.client_address_str}] Client disconnected while writing initial body part."
-                )
-
-    async def _process_content_chunk(
-        self, chunk: str, response: web.StreamResponse, request: web.Request
+    async def _parse_and_prepare_response(
+        self, header_section: str, initial_body_chunk: str
     ):
-        """Process a content chunk, handling header parsing if needed."""
-        self.llm_response_fully_collected_text_for_log += chunk
+        # This method parses the HTTP status line and headers and prepares the
+        # aiohttp.web.StreamResponse.
+        try:
+            # Handle both \r\n and \n line endings
+            if '\r\n' in header_section:
+                lines = header_section.split('\r\n')
+                separator_used = '\r\n'
+            else:
+                lines = header_section.split('\n')
+                separator_used = '\n'
+            
+            status_line = lines[0]
+            
+            # Parse status line: "HTTP/1.1 200 OK"
+            parts = status_line.strip().split(" ", 2)
+            if len(parts) >= 3:
+                version, status_code_str, reason = parts
+                status_code = int(status_code_str)
+            elif len(parts) == 2:
+                version, status_code_str = parts
+                status_code = int(status_code_str)
+                reason = ""
+            else:
+                raise ValueError(f"Invalid status line: {status_line}")
 
-        if self.headers_and_status_parsed:
-            try:
-                await response.write(chunk.encode("utf-8"))
-            except (ClientConnectionResetError, ConnectionResetError):
-                app_logger.warning(
-                    f"[{self.client_address_str}] Client disconnected during stream."
-                )
-            return
+            # Parse headers
+            headers = {}
+            for line in lines[1:]:
+                line = line.strip()
+                if ": " in line:
+                    key, value = line.split(": ", 1)
+                    headers[key] = value
 
-        self.body_buffer += chunk
+            # Set status and headers BEFORE preparing the response
+            self.response.set_status(status_code, reason.strip())
+            for key, value in headers.items():
+                self.response.headers[key] = value
+            
+            # Now prepare the response
+            await self.response.prepare(self.request)
 
-        # The LLM is expected to stream a full HTTP response, headers and body.
-        # We buffer the initial part of the stream until we find the double newline
-        # that separates headers from the body.
-        separator = None
-        if "\r\n\r\n" in self.body_buffer:
-            separator = "\r\n\r\n"
-        elif "\n\n" in self.body_buffer:
-            separator = "\n\n"
-
-        if separator:
-            header_section, body_part = self.body_buffer.split(separator, 1)
-            app_logger.info(
-                f"[{self.client_address_str}] Parsing HTTP headers from LLM. "
-                f"Header section: '{header_section[:200]}{'...' if len(header_section) > 200 else ''}'"
+            # Write initial body chunk if available
+            if initial_body_chunk:
+                await self.response.write(initial_body_chunk.encode("utf-8"))
+                
+        except (ClientConnectionResetError, ConnectionResetError):
+            app_logger.warning(
+                "[%s] Client disconnected while writing initial body part.",
+                self.client_address_str,
             )
-            await self._parse_and_prepare_response(
-                header_section, body_part, response, request
+        except Exception as e:
+            app_logger.exception(
+                "[%s] Error parsing LLM response headers: %s",
+                self.client_address_str,
+                e,
             )
-        else:
-            app_logger.debug(
-                f"[{self.client_address_str}] No header separator found yet, continuing to buffer"
+            # Mark as error so we can potentially send a fallback
+            self.model_error_indicator_for_recording = "header_parsing_error"
+            # Create a new response object for error case
+            self.response = web.StreamResponse(
+                status=500, reason="LLM Header Parsing Error"
             )
+            await self.response.prepare(self.request)
+
+    @property
+    def prepared(self) -> bool:
+        return self.response.prepared
+
+
+class LLMResponseStreamer:
+    """
+    A streaming response handler that processes LLM output and converts it to HTTP responses.
+    """
+
+    def __init__(self, client_address_str: str):
+        self.client_address_str = client_address_str
+
+    async def stream_response(
+        self,
+        request: web.Request,
+        agent_stream: AsyncGenerator[Any, None],
+        max_turns: int,
+        session_id_from_cookie: str | None,
+    ) -> tuple[web.StreamResponse, str | None, dict[str, Any]]:
+        """
+        Process the agent stream and return the response with metrics.
+        
+        Returns:
+            A tuple of (response, final_session_id_for_turn, metrics)
+        """
+        # Get the agent from the request
+        agent = request.app["agent"]
+        
+        # Create streaming context
+        context = StreamingContext(request, agent)
+        
+        # Stream the response
+        response, metrics = await context.stream_agent_response(agent_stream)
+        
+        # Add timing metrics
+        metrics["llm_first_token_time"] = context.llm_first_token_time
+        metrics["llm_stream_end_time"] = context.llm_stream_end_time
+        
+        # For now, return the original session_id_from_cookie as final_session_id_for_turn
+        # This can be enhanced later to handle session ID changes from tool calls
+        final_session_id_for_turn = session_id_from_cookie
+        
+        return response, final_session_id_for_turn, metrics

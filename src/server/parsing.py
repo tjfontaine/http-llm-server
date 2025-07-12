@@ -6,6 +6,7 @@ and constructing raw HTTP requests.
 """
 
 import re
+
 import yaml
 from aiohttp import web
 
@@ -49,26 +50,26 @@ def parse_webapp_file(file_path):
         return {}, ""
 
 
-async def get_raw_request_aiohttp(request: web.Request) -> str:
+async def get_raw_request_str(request: web.Request) -> str:
     """
     Constructs the raw HTTP request string from an aiohttp.web.Request object.
     """
-    raw_request_line_str = f"{request.method} {request.path_qs} HTTP/{request.version.major}.{request.version.minor}"
+    raw_request_line_str = (
+        f"{request.method} {request.path_qs} "
+        f"HTTP/{request.version.major}.{request.version.minor}"
+    )
     header_lines = [f"{key}: {value}" for key, value in request.headers.items()]
     body_str = ""
-    if request.can_read_body:
-        body_bytes = await request.read()
+    body_bytes = await request.read()
+    if body_bytes:
         charset = request.charset or "utf-8"
         try:
             body_str = body_bytes.decode(charset)
         except (UnicodeDecodeError, LookupError):
             app_logger.warning(
-                f"Could not decode request body with charset {charset}, used latin-1 fallback."
+                f"Could not decode request body with charset {charset}, "
+                "used latin-1 fallback."
             )
             body_str = body_bytes.decode("latin-1", "replace")
 
-    full_request_parts = [raw_request_line_str] + header_lines
-    if body_str or request.can_read_body:
-        full_request_parts.append("")
-        full_request_parts.append(body_str)
-    return "\r\n".join(full_request_parts)
+    return "\r\n".join([raw_request_line_str] + header_lines + ["", body_str])

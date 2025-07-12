@@ -1,8 +1,8 @@
+import json
 from typing import Any, Dict, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import json
 
 
 class McpServerConfig(BaseSettings):
@@ -19,7 +19,8 @@ class McpServerConfig(BaseSettings):
 
 class Config(BaseSettings):
     """
-    Typed configuration for HTTP LLM Server, loaded from environment variables or CLI args.
+    Typed configuration for HTTP LLM Server, loaded from environment variables or
+    CLI args.
     """
 
     model_config = SettingsConfigDict(
@@ -85,72 +86,55 @@ class Config(BaseSettings):
         if not self.web_app_file:
             self.web_app_file = self._get_default_info_site_path()
 
-        # Load web app content if web_app_file is provided (which now includes the default)
+        # Load web app content if web_app_file is provided (which now includes
+        # the default)
         if self.web_app_file:
             self._load_web_app_content()
 
         # Load default system prompt if not already set (fallback only)
         if not self.system_prompt_template:
-            self._load_default_system_prompt()
+            self._load_system_prompt()
 
-    def _get_default_info_site_path(self) -> Optional[str]:
-        """Get the path to the default info site."""
+    def _get_default_info_site_path(self) -> str:
+        """Returns path to the default info site prompt."""
         import os
 
-        # __file__ is src/config.py, so we need to go up one level to get to examples/default_info_site/prompt.md
+        # __file__ is src/config.py, so go up one level to find examples
         default_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "examples",
             "default_info_site",
             "prompt.md",
         )
+        return default_path
 
-        # Only return the path if the file exists
-        if os.path.exists(default_path):
-            return default_path
-        return None
-
-    def _load_default_system_prompt(self) -> None:
-        """Load the default system prompt from src/prompts/system.md."""
+    def _load_system_prompt(self):
+        """Loads the system prompt from a file or uses a fallback."""
         import os
 
-        # Try to load from src/prompts/system.md relative to the project root
-        # __file__ is src/config.py, so we need to go up one level to get to src/prompts/system.md
+        # Try to load from src/prompts/system.md relative to project root
+        # __file__ is src/config.py, so go up one level to get to
+        # src/prompts/system.md
         system_prompt_path = os.path.join(
             os.path.dirname(__file__), "prompts", "system.md"
         )
-
         try:
             with open(system_prompt_path, "r", encoding="utf-8") as f:
                 self.system_prompt_template = f.read()
         except Exception:
             # If we can't load the file, use a basic fallback prompt
-            self.system_prompt_template = """You are an advanced AI assistant powering a web server. Your primary goal is to
-act as a fully-featured web server, responding to raw HTTP requests with raw
-HTTP responses. You must generate the entire HTTP response, including the status
-line, headers, and body.
-
-**Response Formatting:**
-
-- Your response MUST be a complete and valid HTTP response.
-- ALWAYS start with the HTTP status line (e.g., `HTTP/1.1 200 OK`).
-- Include all necessary headers (e.g., `Content-Type`, `Set-Cookie`).
-- Separate headers from the body with a blank line (`\\r\\n\\r\\n`).
-
-**Context for this request:**
-
-- Session ID: `{{ session_id }}`
-- Current server-side token count for this session: `{{ current_token_count }}`
-- Context window maximum for your model: `{{ context_window_max }}`
-- Global State: `{{ global_state }}`
-- Example `Date` header: `{{ dynamic_date_example }}`
-- Example `Server` header: `{{ dynamic_server_name_example }}`
-"""
+            self.system_prompt_template = (
+                "You are an advanced AI assistant powering a web server. Your primary "
+                "goal is to act as a fully-featured web server, responding to raw "
+                "HTTP requests with raw HTTP responses. You must generate the "
+                "entire HTTP response, including the status line, headers, and body."
+            )
 
     def _load_web_app_content(self) -> None:
         """Load content from the web app file into configuration fields."""
         import os
         import re
+
         import yaml
 
         if not os.path.exists(self.web_app_file):
@@ -200,6 +184,7 @@ line, headers, and body.
         """Parse web app file and extract MCP server configurations."""
         import os
         import re
+
         import yaml
 
         if not os.path.exists(web_app_file):

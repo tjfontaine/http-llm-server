@@ -35,5 +35,15 @@ dependencies = [
 [project.scripts]
 start_server = "src.app:create_app"
 
+[tool.ruff]
+line-length = 88
+exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.format]
+exclude = ["vendor"]
+
 [tool.uv.sources]
 openai-agents = { path = "vendor/openai-agents-python" }

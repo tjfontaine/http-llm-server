@@ -28,18 +28,18 @@ and startup/shutdown logic has been moved to the new orchestration system.
 """
 
 import json
+import os
 import time
 from email.utils import formatdate
-import os
 
 import jinja2
 from agents import Runner
 from aiohttp import web
 
-from .server.errors import send_llm_error_response_aiohttp
-from .server.parsing import get_raw_request_aiohttp
-from .server.streaming import LLMResponseStreamer
 from .logging_config import get_loggers
+from .server.errors import send_llm_error_response_aiohttp
+from .server.parsing import get_raw_request_str
+from .server.streaming import LLMResponseStreamer
 
 # Initialize with default logging - will be reconfigured when config is available
 app_logger, _, _ = get_loggers()
@@ -76,7 +76,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     current_token_count = request["session_token_count"]
 
     # Get raw request text
-    raw_request_text = await get_raw_request_aiohttp(request)
+    raw_request_text = await get_raw_request_str(request)
     request["raw_request_text"] = raw_request_text  # Store for middleware use
 
     # Load typed config and app state
@@ -108,11 +108,15 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
     # Prepare the debug panel prompt if debug mode is enabled
     debug_panel_prompt = ""
-    if config.debug:
+    if config.debug and not request.headers.get("X-Debug-Panel-Injected"):
         debug_panel_prompt = request.app.get("debug_panel_prompt", "")
         app_logger.info(
-            f"[{client_address_str}] Debug mode is active. Injecting debug panel prompt."
+            f"[{client_address_str}] Debug mode active. Injecting debug panel."
         )
+        history.append({
+            "role": "user",
+            "content": f"Debug panel prompt: {debug_panel_prompt}",
+        })
 
     jinja_context = {
         "session_id": session_id_from_cookie or "",
@@ -135,6 +139,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         app_logger.exception(f"Jinja2 template syntax error in the system prompt: {e}")
         return await send_llm_error_response_aiohttp(
             request,
+            agent,
             500,
             "Server Configuration Error",
             "Invalid system prompt template.",
@@ -146,7 +151,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     messages.append({"role": "user", "content": raw_request_text})
 
     app_logger.info(
-        f"[{client_address_str}] Processing request: {session_id_from_cookie or 'new session'}, "
+        f"[{client_address_str}] Req: {session_id_from_cookie or 'new session'}, "
         f"History: {len(history)} turns, Tokens: {current_token_count}"
     )
 
@@ -172,10 +177,11 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
     # Log the system prompt and message structure at debug level
     app_logger.debug(
-        f"[{client_address_str}] System prompt length: {len(dynamic_system_prompt)} chars"
+        f"[{client_address_str}] System prompt: {len(dynamic_system_prompt)} chars"
     )
     app_logger.debug(
-        f"[{client_address_str}] Messages: {len(messages)} total, roles: {[msg.get('role', 'unknown') for msg in messages]}"
+        f"[{client_address_str}] Messages: {len(messages)} total, roles: "
+        f"{[msg.get('role', 'unknown') for msg in messages]}"
     )
 
     # Run the LLM stream
@@ -208,10 +214,11 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # Validate response
     if not response.prepared:
         app_logger.warning(
-            f"[{client_address_str}] LLM stream finished without valid HTTP response headers"
+            f"[{client_address_str}] LLM stream finished with no HTTP headers."
         )
         return await send_llm_error_response_aiohttp(
             request,
+            agent,
             500,
             "Internal Server Error",
             "LLM did not produce a valid HTTP response.",
