@@ -65,8 +65,6 @@ MUST follow these rules.
 **Context for this request:**
 
 - Session ID: `{{ session_id }}`
-- Current server-side token count for this session: `{{ current_token_count }}`
-- Context window maximum for your model: `{{ context_window_max }}`
-- Global State: `{{ global_state }}`
 - Example `Date` header: `{{ dynamic_date_example }}`
 - Example `Server` header: `{{ dynamic_server_name_example }}`
+- Global State: `{{ global_state }}`

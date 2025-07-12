@@ -21,32 +21,29 @@ _STANDARD_LOG_RECORD_KEYS = set(
 )
 
 
-# Custom formatter for enhanced structured logging
-class EnhancedStructuredFormatter(logging.Formatter):
-    """Enhanced formatter for consistent, structured logging with rich information."""
+class SingleLineExtrasFilter(logging.Filter):
+    """
+    A logging filter to format extra parameters into a single line.
 
-    def format(self, record: logging.LogRecord) -> str:
-        timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
-        level_name = record.levelname
-        logger_name = record.name
-        extra_items = {
-            k: v
-            for k, v in record.__dict__.items()
-            if k not in logging.LogRecord.__dict__
+    This filter iterates over the 'extra' parameters in a LogRecord,
+    formats them as key=value pairs, and appends them to the log message.
+    It then removes these keys from the record to prevent RichHandler
+    from printing them on separate lines.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        extra = {
+            k: v for k, v in record.__dict__.items() if k not in _STANDARD_LOG_RECORD_KEYS
         }
 
-        if extra_items:
-            extra_info = " ".join(f"{k}={v}" for k, v in extra_items.items())
-            message = (
-                f"[{timestamp}] {level_name:8} {logger_name:20} | "
-                f"{record.getMessage()} | {extra_info}"
+        if extra:
+            record.msg = f"{record.getMessage()} | " + " ".join(
+                f"{k}={v}" for k, v in extra.items()
             )
-        else:
-            message = (
-                f"[{timestamp}] {level_name:8} {logger_name:20} | {record.getMessage()}"
-            )
+            for key in extra:
+                del record.__dict__[key]
 
-        return message
+        return True
 
 
 def configure_logging(log_level: str = "INFO"):
@@ -84,9 +81,13 @@ def configure_logging(log_level: str = "INFO"):
     # The root logger must be set to the most verbose level of all loggers.
     root_logger.setLevel(min(app_log_level, deps_log_level))
     rich_handler = RichHandler(
-        rich_tracebacks=True, show_path=False, show_time=False, markup=True
+        rich_tracebacks=True,
+        show_path=True,
+        show_time=True,
+        markup=True,
+        show_level=True,
     )
-    rich_handler.setFormatter(EnhancedStructuredFormatter())
+    rich_handler.addFilter(SingleLineExtrasFilter())
     root_logger.addHandler(rich_handler)
 
     # 4. Set levels for our application-specific loggers

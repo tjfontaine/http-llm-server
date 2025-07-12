@@ -20,7 +20,6 @@ from aiohttp import web
 from src.app import handle_http_request
 from src.config import Config, McpServerConfig
 from src.logging_config import get_loggers
-from src.server.conversation import HttpConversationStore
 from src.server.middleware import (
     error_handling_middleware,
     logging_and_metrics_middleware,
@@ -182,9 +181,6 @@ class WebServer:
     async def start(self):
         config = Config()
         self.app["config"] = config
-        self.app["session_store"] = HttpConversationStore(
-            save_to_disk=config.save_conversations
-        )
         self.app["global_state"] = {}
         self.add_route("/{path:.*}", handle_http_request)
         await self.initialize_agent(config)

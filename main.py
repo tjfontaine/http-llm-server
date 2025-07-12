@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import sys
 from contextlib import asynccontextmanager
 
@@ -17,7 +18,7 @@ from agents.mcp import MCPServerStdio
 from src.config import Config
 from src.logging_config import configure_logging
 
-app_logger = logging.getLogger("main")
+app_logger = logging.getLogger("llm_http_server_app")
 
 
 async def wait_for_server(base_url: str, timeout: int = 10) -> bool:
@@ -79,6 +80,20 @@ async def core_services_server(log_level: str):
 
 async def main():
     """Main entry point for the application."""
+    # Create a shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Get the current loop
+    loop = asyncio.get_running_loop()
+
+    # Set up signal handlers
+    def _signal_handler():
+        app_logger.info("Shutdown signal received, initiating graceful shutdown.")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_handler)
+
     # Load configuration
     config = Config()
 
@@ -94,7 +109,15 @@ async def main():
 
     configure_logging(config.log_level)
 
-    app_logger.info(f"Starting application with config: {config}")
+    app_logger.info(
+        "Starting application with key configurations",
+        extra={
+            "one_shot": config.one_shot,
+            "log_level": config.log_level,
+            "web_app": config.web_app_file,
+            "model": config.openai_model_name,
+        },
+    )
     if config.one_shot:
         app_logger.info("Running in one-shot mode")
 
@@ -198,6 +221,11 @@ async def main():
 
             except Exception as e:
                 app_logger.error(f"One-shot HTTP request failed: {e}")
+        else:
+            app_logger.info("Application started successfully. Running in server mode.")
+            # Wait for the shutdown event
+            await shutdown_event.wait()
+            app_logger.info("Shutdown event received, server is stopping.")
 
 
 if __name__ == "__main__":

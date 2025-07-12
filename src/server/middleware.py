@@ -166,20 +166,11 @@ def logging_and_metrics_middleware():
                 != session_id_from_cookie,
                 "http_method": request.method,
                 "http_path_qs": request.path_qs,
+                "http_status": response.status,
                 "llm_finish_reason": last_chunk_finish_reason,
             }
 
-            log_msg_final = f"[{client_address_str}] Request handled. "
-            log_msg_final += f"TotalDur: {duration:.3f}s, LLM_TTFT: {ttft_str}, "
-            log_msg_final += f"LLM_StreamDur: {duration_llm_stream_str}, "
-            log_msg_final += f"PToken: {prompt_tokens_from_usage}, "
-            log_msg_final += f"CToken: {completion_tokens_from_usage}, "
-            log_msg_final += f"CTPS: {compl_tokens_per_sec_str}, "
-            log_msg_final += f"Sess: {final_session_id_for_turn}, "
-            log_msg_final += (
-                f"FinishReason: "
-                f"{last_chunk_finish_reason if last_chunk_finish_reason else 'N/A'}."
-            )
+            log_msg_final = f"[{client_address_str}] {request.method} {request.path_qs} - {response.status}"
 
             if model_error_indicator_for_recording:
                 log_msg_final += " [MODEL_ERROR]"
@@ -239,48 +230,53 @@ def session_middleware():
                     ].split(";")[0]
                     if session_id_from_cookie:
                         app_logger.info(
-                            f"[{client_address_str}] Existing session ID from cookie: "
-                            f"{session_id_from_cookie}"
+                            "Existing session ID from cookie",
+                            extra={
+                                "client_address": client_address_str,
+                                "session_id": session_id_from_cookie,
+                            },
                         )
             except Exception:
                 app_logger.exception(
-                    f"[{client_address_str}] Error parsing 'Cookie' header: "
-                    f"'{cookie_header}'. Treating as no session."
+                    "Error parsing 'Cookie' header, treating as no session.",
+                    extra={
+                        "client_address": client_address_str,
+                        "header": cookie_header,
+                    },
                 )
-
-        # Determine the final session ID for this turn
-        session_id = request.get("session_id_for_turn") or session_id_from_cookie
 
         # Store session information on request
         request["session_id_from_cookie"] = session_id_from_cookie
 
-        # Get session store and attach session data
-        current_session_store = request.app["session_store"]
-        request["session_store"] = current_session_store
+        # Session history and token count are now managed by the agent's session memory
+        request["llm_history"] = []
+        request["session_token_count"] = 0
 
-        if session_id:
-            # Load session data
-            full_history = await current_session_store.get_history(session_id)
-            current_token_count = await current_session_store.get_token_count(
-                session_id
+        response = await handler(request)
+
+        final_session_id_for_turn = request.get("final_session_id_for_turn")
+
+        # Set cookie if a new session ID was generated
+        if (
+            final_session_id_for_turn
+            and final_session_id_for_turn != session_id_from_cookie
+        ):
+            app_logger.info(
+                "Setting new session cookie",
+                extra={
+                    "client_address": client_address_str,
+                    "session_id": final_session_id_for_turn,
+                },
+            )
+            response.set_cookie(
+                "session_id",
+                final_session_id_for_turn,
+                httponly=True,
+                samesite="Lax",
+                path="/",
             )
 
-            # Attach session data to request
-            request["session_history"] = full_history
-            request["session_token_count"] = current_token_count
-
-            # Also store the simplified history format for LLM consumption
-            request["llm_history"] = [
-                {"role": turn.role, "content": turn.content}
-                for turn in full_history.messages
-            ]
-        else:
-            # No session - set defaults
-            request["session_history"] = None
-            request["session_token_count"] = 0
-            request["llm_history"] = []
-
-        return await handler(request)
+        return response
 
     return middleware
 
@@ -298,19 +294,28 @@ def error_handling_middleware():
         request: web.Request,
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
-        client_address_str = request.get("client_address_str", "Unknown Client")
-
         try:
-            return await handler(request)
-        except Exception as e:
-            app_logger.exception(
-                f"[{client_address_str}] Unhandled exception in request handler: {e}"
+            response = await handler(request)
+            # If the response is an error response, the body is already set
+            # by send_llm_error_response_aiohttp. We just return it.
+            if response.status >= 400:
+                app_logger.warning(
+                    f"Request to {request.path} resulted in status {response.status}"
+                )
+            return response
+        except web.HTTPException as ex:
+            # Handle known aiohttp exceptions
+            app_logger.warning(f"HTTP exception for {request.path}: {ex}")
+            return await send_llm_error_response_aiohttp(
+                request,
+                request.app["agent"],
+                ex.status,
+                ex.reason,
+                ex.text,
             )
-
-            # Store error information for logging middleware
-            request["model_error_indicator_for_recording"] = "UNHANDLED_EXCEPTION"
-            request["llm_response_fully_collected_text_for_log"] = f"ERROR: {str(e)}"
-
+        except Exception as e:
+            # Fallback for unhandled exceptions
+            app_logger.exception(f"Unhandled exception in handler for {request.path}")
             return await send_llm_error_response_aiohttp(
                 request,
                 request.app["agent"],
@@ -324,10 +329,9 @@ def error_handling_middleware():
 
 def session_cleanup_middleware():
     """
-    Middleware factory for session cleanup after request processing.
+    Middleware factory for cleaning up session data after a request.
 
-    Records conversation turns and updates token counts after the main handler
-    completes. This runs after the handler but before the logging middleware.
+    This middleware is responsible for persisting session data if needed.
     """
 
     @web.middleware
@@ -337,50 +341,9 @@ def session_cleanup_middleware():
     ) -> web.StreamResponse:
         response = await handler(request)
 
-        # Extract necessary data from request context
-        client_address_str = request.get("client_address_str", "Unknown Client")
-        session_store = request.get("session_store")
-        final_session_id_for_turn = request.get("final_session_id_for_turn")
-        raw_request_text = request.get("raw_request_text", "")
-        llm_response_fully_collected_text_for_log = request.get(
-            "llm_response_fully_collected_text_for_log", ""
-        )
-        model_error_indicator_for_recording = request.get(
-            "model_error_indicator_for_recording"
-        )
-        prompt_tokens_from_usage = request.get("prompt_tokens_from_usage", 0)
-
-        # Record conversation turn in session
-        if final_session_id_for_turn and session_store:
-            await session_store.record_turn(
-                final_session_id_for_turn, "user", raw_request_text
-            )
-
-            assistant_content_for_history = llm_response_fully_collected_text_for_log
-            if model_error_indicator_for_recording:
-                interrupted = model_error_indicator_for_recording
-                llm_response_fully_collected_text_for_log = (
-                    f"[MODEL_INTERRUPTED_OR_ERROR: {interrupted}]\n\n"
-                    f"{llm_response_fully_collected_text_for_log}"
-                )
-            elif not llm_response_fully_collected_text_for_log.strip():
-                llm_response_fully_collected_text_for_log = EMPTY_RESPONSE_STREAMED
-
-            await session_store.record_turn(
-                final_session_id_for_turn,
-                "assistant",
-                assistant_content_for_history,
-            )
-            if prompt_tokens_from_usage > 0:
-                await session_store.update_token_count(
-                    final_session_id_for_turn, prompt_tokens_from_usage
-                )
-            elif not final_session_id_for_turn:
-                app_logger.error(
-                    f"[{client_address_str}] Could not determine session ID for "
-                    "saving conversation turn. LLM may have failed to create a "
-                    "session or set a cookie."
-                )
+        # Session persistence is now handled by the agent's SQLite session memory.
+        # The logic for saving conversation history to request.app["sessions"]
+        # has been removed.
 
         return response
 

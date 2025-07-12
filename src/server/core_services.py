@@ -14,13 +14,13 @@ from rich.logging import RichHandler
 
 from src.server.web_resource import WebServer
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("llm_http_server_app")
 
 
 def configure_subprocess_logging(log_level: str = "INFO"):
     """Configure consistent logging for subprocess visibility."""
-    # Import both the formatter and RichHandler from main process
-    from src.logging_config import EnhancedStructuredFormatter
+    # Import the filter from the main logging configuration
+    from src.logging_config import SingleLineExtrasFilter
 
     # Get the root logger
     root_logger = logging.getLogger()
@@ -42,7 +42,7 @@ def configure_subprocess_logging(log_level: str = "INFO"):
         tracebacks_show_locals=True,
         show_path=False,
     )
-    rich_handler.setFormatter(EnhancedStructuredFormatter())
+    rich_handler.addFilter(SingleLineExtrasFilter())
     root_logger.addHandler(rich_handler)
 
 

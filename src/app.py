@@ -30,10 +30,11 @@ and startup/shutdown logic has been moved to the new orchestration system.
 import json
 import os
 import time
+import uuid
 from email.utils import formatdate
 
 import jinja2
-from agents import Runner
+from agents import Runner, SQLiteSession
 from aiohttp import web
 
 from .logging_config import get_loggers
@@ -72,8 +73,17 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # Get data from middleware
     client_address_str = request["client_address_str"]
     session_id_from_cookie = request["session_id_from_cookie"]
-    history = request["llm_history"]
-    current_token_count = request["session_token_count"]
+    # history = request["llm_history"] # No longer needed, handled by SQLiteSession
+    # current_token_count = request["session_token_count"] # No longer needed
+
+    # Ensure session_id exists
+    session_id = session_id_from_cookie or str(uuid.uuid4())
+    request["final_session_id_for_turn"] = session_id  # Make it available to middleware
+
+    # Create SQLite session
+    db_path = "data/http-llm-server.db"
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    session = SQLiteSession(session_id=session_id, db_path=db_path)
 
     # Get raw request text
     raw_request_text = await get_raw_request_str(request)
@@ -111,24 +121,24 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     if config.debug and not request.headers.get("X-Debug-Panel-Injected"):
         debug_panel_prompt = request.app.get("debug_panel_prompt", "")
         app_logger.info(
-            f"[{client_address_str}] Debug mode active. Injecting debug panel."
+            "Debug mode active. Injecting debug panel.",
+            extra={"client_address": client_address_str},
         )
-        history.append({
-            "role": "user",
-            "content": f"Debug panel prompt: {debug_panel_prompt}",
-        })
+        # We no longer manually manage history
+        # history.append({
+        #     "role": "user",
+        #     "content": f"Debug panel prompt: {debug_panel_prompt}",
+        # })
 
     jinja_context = {
-        "session_id": session_id_from_cookie or "",
+        "session_id": session_id or "",
         "global_state": json.dumps(global_state, indent=2),
-        "current_token_count": str(current_token_count),
         "context_window_max": str(context_window_max),
         "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),
         "dynamic_server_name_example": "LLMWebServer/0.1",
         "WEB_APP_DIR": web_app_dir,
         "web_app_rules": rendered_rules,
         "debug_panel_prompt": debug_panel_prompt,
-        "history_json": json.dumps(history, indent=2),
     }
 
     # Render system prompt
@@ -145,20 +155,24 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "Invalid system prompt template.",
         )
 
-    # Prepare messages for LLM
-    messages = [{"role": "system", "content": dynamic_system_prompt}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": raw_request_text})
+    # Prepare messages for LLM - now handled by session
+    # messages = [{"role": "system", "content": dynamic_system_prompt}]
+    # messages.extend(history)
+    # messages.append({"role": "user", "content": raw_request_text})
 
     app_logger.info(
-        f"[{client_address_str}] Req: {session_id_from_cookie or 'new session'}, "
-        f"History: {len(history)} turns, Tokens: {current_token_count}"
+        "Handling request with session",
+        extra={
+            "client_address": client_address_str,
+            "session_id": session_id or "new",
+        },
     )
 
     # Reset agent instructions and start LLM processing
-    agent.instructions = None
+    # agent.instructions = None # We now clone the agent with new instructions
+    cloned_agent = agent.clone(instructions=dynamic_system_prompt)
     app_logger.debug(
-        f"[{client_address_str}] Agent instructions set to: {agent.instructions}"
+        f"[{client_address_str}] Agent instructions set to: {cloned_agent.instructions}"
     )
 
     # Store timing for middleware
@@ -166,35 +180,40 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     request["llm_call_start_time"] = llm_call_start_time
 
     app_logger.debug(
-        f"[{client_address_str}] Starting LLM request processing",
+        "Starting LLM request processing",
         extra={
-            "session_id": session_id_from_cookie or "new",
-            "history_turns": len(history),
-            "token_count": current_token_count,
+            "client_address": client_address_str,
+            "session_id": session_id or "new",
+            "model": config.openai_model_name,
             "max_turns": max_turns,
         },
     )
 
     # Log the system prompt and message structure at debug level
     app_logger.debug(
-        f"[{client_address_str}] System prompt: {len(dynamic_system_prompt)} chars"
+        "System prompt length",
+        extra={
+            "client_address": client_address_str,
+            "length": len(dynamic_system_prompt),
+        },
     )
-    app_logger.debug(
-        f"[{client_address_str}] Messages: {len(messages)} total, roles: "
-        f"{[msg.get('role', 'unknown') for msg in messages]}"
-    )
+    # app_logger.debug(
+    #     f"[{client_address_str}] Messages: {len(messages)} total, roles: "
+    #     f"{[msg.get('role', 'unknown') for msg in messages]}"
+    # )
 
     # Run the LLM stream
     agent_stream = Runner.run_streamed(
-        agent,
-        messages,
+        cloned_agent,
+        raw_request_text,
         max_turns=max_turns,
+        session=session,
     )
 
     # Delegate streaming to the dedicated streamer class
     streamer = LLMResponseStreamer(client_address_str)
     response, final_session_id_for_turn, metrics = await streamer.stream_response(
-        request, agent_stream, max_turns, session_id_from_cookie
+        request, agent_stream, max_turns, session_id
     )
 
     # Store metrics and session data on request for middleware use

@@ -22,3 +22,5 @@ __pycache__/
 /examples/data_dashboard/data/
 .DS_Store
 *.db
+
+data/

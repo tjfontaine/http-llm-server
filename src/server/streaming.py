@@ -44,9 +44,14 @@ class StreamingContext:
         async for event in agent_stream.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
                 # Handle different types of response events
-                from openai.types.responses import ResponseTextDeltaEvent, ResponseCompletedEvent
-                from openai.types.responses.response_created_event import ResponseCreatedEvent
-                
+                from openai.types.responses import (
+                    ResponseTextDeltaEvent,
+                    ResponseCompletedEvent,
+                )
+                from openai.types.responses.response_created_event import (
+                    ResponseCreatedEvent,
+                )
+
                 if isinstance(event.data, ResponseTextDeltaEvent):
                     # Handle text delta events (streaming content)
                     if event.data.delta:
@@ -56,43 +61,57 @@ class StreamingContext:
                     if event.data.response.usage:
                         usage = event.data.response.usage
                         app_logger.info(
-                            "[%s] Usage in completed response: %s",
-                            self.client_address_str,
-                            usage,
+                            "Usage in completed response",
+                            extra={
+                                "client_address": self.client_address_str,
+                                "usage": usage,
+                            },
                         )
                         self.prompt_tokens_from_usage += usage.input_tokens or 0
                         self.completion_tokens_from_usage += usage.output_tokens or 0
                         self.total_tokens_from_usage += usage.total_tokens or 0
-                        
+
                         # Get finish reason from the first choice if available
-                        if event.data.response.output and len(event.data.response.output) > 0:
+                        if (
+                            event.data.response.output
+                            and len(event.data.response.output) > 0
+                        ):
                             first_output = event.data.response.output[0]
-                            if hasattr(first_output, 'finish_reason'):
-                                self._last_chunk_finish_reason = first_output.finish_reason
-                    
+                            if hasattr(first_output, "finish_reason"):
+                                self._last_chunk_finish_reason = (
+                                    first_output.finish_reason
+                                )
+
                     # For completed responses, we also need to process the full response content
                     # In case it wasn't streamed in deltas
-                    if event.data.response.output and len(event.data.response.output) > 0:
+                    if (
+                        event.data.response.output
+                        and len(event.data.response.output) > 0
+                    ):
                         first_output = event.data.response.output[0]
-                        if hasattr(first_output, 'content') and first_output.content:
+                        if hasattr(first_output, "content") and first_output.content:
                             for content_item in first_output.content:
-                                if hasattr(content_item, 'text') and content_item.text:
+                                if hasattr(content_item, "text") and content_item.text:
                                     # Only process if we haven't received this content via deltas
                                     if not self.llm_response_fully_collected_text_for_log:
                                         await self.process_chunk(content_item.text)
                 elif isinstance(event.data, ResponseCreatedEvent):
                     # Handle response created events (initial response setup)
                     app_logger.debug(
-                        "[%s] Response created: %s",
-                        self.client_address_str,
-                        event.data.response.id,
+                        "Response created",
+                        extra={
+                            "client_address": self.client_address_str,
+                            "response_id": event.data.response.id,
+                        },
                     )
                 # Handle other event types as needed
                 else:
                     app_logger.debug(
-                        "[%s] Unhandled raw response event type: %s",
-                        self.client_address_str,
-                        type(event.data).__name__,
+                        "Unhandled raw response event type",
+                        extra={
+                            "client_address": self.client_address_str,
+                            "event_type": type(event.data).__name__,
+                        },
                     )
             elif isinstance(event, RunItemStreamEvent):
                 if event.name == "tool_called":
@@ -101,17 +120,19 @@ class StreamingContext:
         # After the stream finishes, handle any remaining buffered content
         if not self.response.prepared:
             app_logger.warning(
-                "[%s] Stream finished but HTTP response headers were not finalized.",
-                self.client_address_str,
+                "Stream finished but HTTP response headers were not finalized",
+                extra={"client_address": self.client_address_str},
             )
 
             # Log the collected text for debugging purposes
             log_text = self.llm_response_fully_collected_text_for_log
             log_snippet = f"{log_text[:200]}{'...' if len(log_text) > 200 else ''}"
             app_logger.debug(
-                "[%s] Full text collected before parsing headers. Snippet: '%s'",
-                self.client_address_str,
-                log_snippet,
+                "Full text collected before parsing headers",
+                extra={
+                    "client_address": self.client_address_str,
+                    "snippet": log_snippet,
+                },
             )
 
             # One last attempt to parse, in case headers arrived but no separator
@@ -121,9 +142,8 @@ class StreamingContext:
                 and not self.header_section
             ):
                 app_logger.debug(
-                    "[%s] Attempting to parse unparsed headers as headers-only "
-                    "response",
-                    self.client_address_str,
+                    "Attempting to parse unparsed headers as headers-only response",
+                    extra={"client_address": self.client_address_str},
                 )
                 # Treat the whole buffer as headers, with an empty body
                 await self._parse_and_prepare_response(self.body_buffer, "")
@@ -131,10 +151,11 @@ class StreamingContext:
 
         if not self.response.prepared:
             app_logger.error(
-                "[%s] Stream ended without valid HTTP headers. Buffer: '%.500s%s'",
-                self.client_address_str,
-                self.body_buffer,
-                "..." if len(self.body_buffer) > 500 else "",
+                "Stream ended without valid HTTP headers",
+                extra={
+                    "client_address": self.client_address_str,
+                    "buffer_snippet": f"{self.body_buffer[:500]}{'...' if len(self.body_buffer) > 500 else ''}",
+                },
             )
 
         # Prepare metrics dictionary
@@ -155,9 +176,11 @@ class StreamingContext:
 
     async def handle_tool_calls(self, item: RunItem):
         app_logger.debug(
-            "[%s] Handling tool calls: %s",
-            self.client_address_str,
-            item,
+            "Handling tool calls",
+            extra={
+                "client_address": self.client_address_str,
+                "item": item,
+            },
         )
         if isinstance(item, ToolCallItem):
             raw_tool_call = item.raw_item
@@ -168,9 +191,8 @@ class StreamingContext:
                         new_id = args.get("session_id")
                         if new_id:
                             app_logger.info(
-                                "Session ID '%s' assigned via tool call. "
-                                "Adopting for logging.",
-                                new_id,
+                                "Session ID assigned via tool call",
+                                extra={"session_id": new_id},
                             )
                             return new_id
         return None
@@ -184,32 +206,33 @@ class StreamingContext:
                 # Buffer until we find the separator
                 self.body_buffer += chunk
                 self.llm_response_fully_collected_text_for_log += chunk
-                
+
                 # Check for both possible separators
                 separator_found = None
                 if self.separator in self.body_buffer:
                     separator_found = self.separator
-                elif '\n\n' in self.body_buffer:
-                    separator_found = '\n\n'
-                
+                elif "\n\n" in self.body_buffer:
+                    separator_found = "\n\n"
+
                 if separator_found:
                     header_section, self.body_buffer = self.body_buffer.split(
                         separator_found, 1
                     )
                     self.header_section = header_section
                     app_logger.info(
-                        "[%s] Parsing HTTP headers from LLM. Header: '%.200s%s'",
-                        self.client_address_str,
-                        header_section,
-                        "..." if len(header_section) > 200 else "",
+                        "Parsing HTTP headers from LLM",
+                        extra={
+                            "client_address": self.client_address_str,
+                            "header_snippet": f"{header_section[:200]}{'...' if len(header_section) > 200 else ''}",
+                        },
                     )
                     await self._parse_and_prepare_response(
                         header_section, self.body_buffer
                     )
                 else:
                     app_logger.debug(
-                        "[%s] No header separator found yet, continuing to buffer",
-                        self.client_address_str,
+                        "No header separator found yet, continuing to buffer",
+                        extra={"client_address": self.client_address_str},
                     )
             else:
                 # Once headers are parsed, stream the rest of the body
@@ -231,15 +254,15 @@ class StreamingContext:
         # aiohttp.web.StreamResponse.
         try:
             # Handle both \r\n and \n line endings
-            if '\r\n' in header_section:
-                lines = header_section.split('\r\n')
-                separator_used = '\r\n'
+            if "\r\n" in header_section:
+                lines = header_section.split("\r\n")
+                separator_used = "\r\n"
             else:
-                lines = header_section.split('\n')
-                separator_used = '\n'
-            
+                lines = header_section.split("\n")
+                separator_used = "\n"
+
             status_line = lines[0]
-            
+
             # Parse status line: "HTTP/1.1 200 OK"
             parts = status_line.strip().split(" ", 2)
             if len(parts) >= 3:
@@ -264,18 +287,18 @@ class StreamingContext:
             self.response.set_status(status_code, reason.strip())
             for key, value in headers.items():
                 self.response.headers[key] = value
-            
+
             # Now prepare the response
             await self.response.prepare(self.request)
 
             # Write initial body chunk if available
             if initial_body_chunk:
                 await self.response.write(initial_body_chunk.encode("utf-8"))
-                
+
         except (ClientConnectionResetError, ConnectionResetError):
             app_logger.warning(
-                "[%s] Client disconnected while writing initial body part.",
-                self.client_address_str,
+                "Client disconnected while writing initial body part",
+                extra={"client_address": self.client_address_str},
             )
         except Exception as e:
             app_logger.exception(
@@ -313,25 +336,25 @@ class LLMResponseStreamer:
     ) -> tuple[web.StreamResponse, str | None, dict[str, Any]]:
         """
         Process the agent stream and return the response with metrics.
-        
+
         Returns:
             A tuple of (response, final_session_id_for_turn, metrics)
         """
         # Get the agent from the request
         agent = request.app["agent"]
-        
+
         # Create streaming context
         context = StreamingContext(request, agent)
-        
+
         # Stream the response
         response, metrics = await context.stream_agent_response(agent_stream)
-        
+
         # Add timing metrics
         metrics["llm_first_token_time"] = context.llm_first_token_time
         metrics["llm_stream_end_time"] = context.llm_stream_end_time
-        
+
         # For now, return the original session_id_from_cookie as final_session_id_for_turn
         # This can be enhanced later to handle session ID changes from tool calls
         final_session_id_for_turn = session_id_from_cookie
-        
+
         return response, final_session_id_for_turn, metrics
