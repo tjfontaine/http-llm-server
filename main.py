@@ -189,7 +189,7 @@ async def main():
                                 raw_tool_call = item.raw_item
                                 if hasattr(raw_tool_call, "function") and raw_tool_call.function:
                                     function_name = getattr(raw_tool_call.function, "name", "unknown")
-                                    app_logger.info(
+                                    app_logger.debug(
                                         "Orchestrator tool called",
                                         extra={
                                             "function_name": function_name,
