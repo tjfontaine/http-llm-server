@@ -80,13 +80,22 @@ class Config(BaseSettings):
 
     def __init__(self, **kwargs):
         """Initialize Config and load web app content if web_app_file is provided."""
+        # Check if web_app_file was explicitly passed
+        explicit_web_app_file = kwargs.get("web_app_file")
+
+        # Remove web_app_file from kwargs to prevent BaseSettings from processing it
+        if "web_app_file" in kwargs:
+            del kwargs["web_app_file"]
+
         super().__init__(**kwargs)
 
         # Always load the base system prompt first.
         self._load_system_prompt()
 
-        # If no web app file is specified, default to the default info site
-        if not self.web_app_file:
+        # Set web_app_file to the explicit value if provided, otherwise use default
+        if explicit_web_app_file is not None:
+            self.web_app_file = explicit_web_app_file
+        elif not self.web_app_file:
             self.web_app_file = self._get_default_info_site_path()
 
         # Load web app content if web_app_file is provided (which now includes

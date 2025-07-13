@@ -44,11 +44,13 @@ class WebServer:
         host: str,
         mcp_servers_config: list = [],
         log_level: str = "INFO",
+        web_app_file: str = None,
     ):
         self.port = port
         self.host = host
         self.mcp_servers_config = mcp_servers_config
         self.log_level = log_level
+        self.web_app_file = web_app_file
         # Note: Logging is configured by core_services.py main() for the subprocess
 
         # Enable verbose agents library logging if TRACE level is requested
@@ -188,7 +190,12 @@ class WebServer:
         self.app.router.add_route("*", path, handler)
 
     async def start(self):
-        config = Config()
+        # Create config with web_app_file if provided
+        if self.web_app_file:
+            config = Config(web_app_file=self.web_app_file)
+        else:
+            config = Config()
+
         self.app["config"] = config
         self.app["global_state"] = {}
         self.add_route("/{path:.*}", handle_http_request)
@@ -200,6 +207,8 @@ class WebServer:
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
         app_logger.info(f"Web server started on http://{self.host}:{self.port}")
+        if self.web_app_file:
+            app_logger.info(f"Using web app file: {self.web_app_file}")
 
     async def stop(self):
         if self.site:

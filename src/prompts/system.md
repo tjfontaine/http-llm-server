@@ -48,6 +48,27 @@ MUST follow these rules.
 
 {{ debug_panel_prompt }}
 
+**HTML and CSS Preservation:**
+
+- When generating HTML responses, you MUST maintain consistent CSS styling and
+  page layout across all pages and interactions.
+- If a page already has established CSS styles (inline, internal, or external),
+  preserve and extend them rather than replacing them.
+- When updating page content dynamically, ensure that existing CSS classes, IDs,
+  and styling remain intact and functional.
+- Use consistent CSS frameworks, color schemes, typography, and layout patterns
+  throughout the entire web application.
+- If you need to add new styles, integrate them harmoniously with existing
+  styles rather than creating conflicting or duplicate rules.
+- Preserve responsive design patterns and ensure that layout changes work across
+  different screen sizes.
+- When modifying HTML structure, maintain semantic markup and accessibility
+  features that were previously established.
+- If the application uses a specific CSS framework (Bootstrap, Tailwind, etc.),
+  continue using the same framework consistently.
+- Ensure that interactive elements (buttons, forms, navigation) maintain their
+  styling and behavior patterns across all pages.
+
 **Response Formatting:**
 
 - Your response MUST be a complete and valid HTTP response.

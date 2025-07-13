@@ -63,12 +63,14 @@ async def create_web_resource(
     host: str = "localhost",
     mcp_servers: list = [],
     log_level: str = "INFO",
+    web_app_file: str = None,
 ) -> TextContent:
     """Creates a web resource and returns its unique ID."""
     try:
         logger.debug(
             f"Creating web resource: port={port}, host={host}, "
-            f"mcp_servers={len(mcp_servers)} servers, log_level={log_level}"
+            f"mcp_servers={len(mcp_servers)} servers, log_level={log_level}, "
+            f"web_app_file={web_app_file}"
         )
 
         resource_id = str(uuid.uuid4())
@@ -77,6 +79,7 @@ async def create_web_resource(
             host=host,
             mcp_servers_config=mcp_servers,
             log_level=log_level,
+            web_app_file=web_app_file,
         )
 
         # Store with metadata for better tracking
@@ -91,6 +94,7 @@ async def create_web_resource(
             "status": "created",
             "created": datetime.now().isoformat(),
             "log_level": log_level,
+            "web_app_file": web_app_file,
         }
 
         success_msg = f"Web resource created with ID: {resource_id}"
@@ -254,7 +258,11 @@ async def setup_web_application(
 
         # Now, create and start the web resource with the collected MCP servers
         create_result = await create_web_resource(
-            context, port=port, mcp_servers=mcp_servers, log_level=log_level
+            context,
+            port=port,
+            mcp_servers=mcp_servers,
+            log_level=log_level,
+            web_app_file=web_app_file,
         )
         resource_id_str = create_result.text
         resource_id_match = re.search(r"[a-f0-9-]+$", resource_id_str)
