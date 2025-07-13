@@ -188,10 +188,11 @@ async def main():
                             if isinstance(item, ToolCallItem):
                                 raw_tool_call = item.raw_item
                                 if hasattr(raw_tool_call, "function") and raw_tool_call.function:
+                                    function_name = getattr(raw_tool_call.function, "name", "unknown")
                                     app_logger.info(
                                         "Orchestrator tool called",
                                         extra={
-                                            "function_name": raw_tool_call.function.name,
+                                            "function_name": function_name,
                                         },
                                     )
                         elif item.name == "tool_output":
@@ -204,9 +205,8 @@ async def main():
                                 if hasattr(item, "tool_call_item") and item.tool_call_item:
                                     tool_call = item.tool_call_item
                                     if hasattr(tool_call, "raw_item") and tool_call.raw_item:
-                                        func = tool_call.raw_item.function
-                                        if hasattr(tool_call.raw_item, "function") and func:
-                                            tool_function_name = tool_call.raw_item.function.name
+                                        if hasattr(tool_call.raw_item, "function") and tool_call.raw_item.function:
+                                            tool_function_name = getattr(tool_call.raw_item.function, "name", "unknown")
                                 
                                 app_logger.info(
                                     "Orchestrator tool result",

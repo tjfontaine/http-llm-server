@@ -169,21 +169,21 @@ class StreamingContext:
         )
         if isinstance(item, ToolCallItem):
             raw_tool_call = item.raw_item
-            if hasattr(raw_tool_call, "function"):
-                if raw_tool_call.function:
-                    # Log tool call at INFO level with function name
-                    app_logger.info(
-                        "Tool called",
-                        extra={
-                            "function_name": raw_tool_call.function.name,
-                            "client_address": self.client_address_str,
-                        },
-                    )
-                    if raw_tool_call.function.name == "create_session":
-                        # The create_session tool returns the new session ID directly
-                        # We need to extract it from the result when it's available
-                        # For now, we'll handle this in the tool result processing
-                        pass
+            if hasattr(raw_tool_call, "function") and raw_tool_call.function:
+                function_name = getattr(raw_tool_call.function, "name", "unknown")
+                # Log tool call at INFO level with function name
+                app_logger.info(
+                    "Tool called",
+                    extra={
+                        "function_name": function_name,
+                        "client_address": self.client_address_str,
+                    },
+                )
+                if function_name == "create_session":
+                    # The create_session tool returns the new session ID directly
+                    # We need to extract it from the result when it's available
+                    # For now, we'll handle this in the tool result processing
+                    pass
         return None
 
     async def handle_tool_results(self, item: RunItem):
@@ -206,9 +206,8 @@ class StreamingContext:
             if hasattr(item, "tool_call_item") and item.tool_call_item:
                 tool_call = item.tool_call_item
                 if hasattr(tool_call, "raw_item") and tool_call.raw_item:
-                    func = tool_call.raw_item.function
-                    if hasattr(tool_call.raw_item, "function") and func:
-                        tool_function_name = tool_call.raw_item.function.name
+                    if hasattr(tool_call.raw_item, "function") and tool_call.raw_item.function:
+                        tool_function_name = getattr(tool_call.raw_item.function, "name", "unknown")
             
             # Log the tool result at INFO level
             app_logger.info(
@@ -224,9 +223,9 @@ class StreamingContext:
             if hasattr(item, "tool_call_item") and item.tool_call_item:
                 tool_call = item.tool_call_item
                 if hasattr(tool_call, "raw_item") and tool_call.raw_item:
-                    func = tool_call.raw_item.function
-                    if hasattr(tool_call.raw_item, "function") and func:
-                        if tool_call.raw_item.function.name == "create_session":
+                    if hasattr(tool_call.raw_item, "function") and tool_call.raw_item.function:
+                        function_name = getattr(tool_call.raw_item.function, "name", "unknown")
+                        if function_name == "create_session":
                             # Extract the session ID from the tool output
                             session_id = str(item.output).strip()
                             if session_id:
