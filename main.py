@@ -180,6 +180,42 @@ async def main():
                         "tool_output",
                     ]:
                         app_logger.debug(f"Agent tool: {item.name}")
+                        
+                        # Enhanced logging for tool calls and results at INFO level
+                        if item.name == "tool_called":
+                            # Log tool call with function name
+                            from agents.items import ToolCallItem
+                            if isinstance(item, ToolCallItem):
+                                raw_tool_call = item.raw_item
+                                if hasattr(raw_tool_call, "function") and raw_tool_call.function:
+                                    app_logger.info(
+                                        "Orchestrator tool called",
+                                        extra={
+                                            "function_name": raw_tool_call.function.name,
+                                        },
+                                    )
+                        elif item.name == "tool_output":
+                            # Log tool result with function name and output
+                            from agents.items import ToolCallOutputItem
+                            if isinstance(item, ToolCallOutputItem):
+                                tool_function_name = "unknown"
+                                
+                                # Extract function name from the tool call
+                                if hasattr(item, "tool_call_item") and item.tool_call_item:
+                                    tool_call = item.tool_call_item
+                                    if hasattr(tool_call, "raw_item") and tool_call.raw_item:
+                                        func = tool_call.raw_item.function
+                                        if hasattr(tool_call.raw_item, "function") and func:
+                                            tool_function_name = tool_call.raw_item.function.name
+                                
+                                app_logger.info(
+                                    "Orchestrator tool result",
+                                    extra={
+                                        "function_name": tool_function_name,
+                                        "result": str(item.output),
+                                    },
+                                )
+                        
                     if hasattr(item, "content") and item.content:
                         app_logger.debug(
                             "Tool result: %.200s%s",
