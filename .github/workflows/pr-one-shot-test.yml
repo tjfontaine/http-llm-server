@@ -7,8 +7,8 @@ on:
 
 jobs:
   one-shot-test:
-    # Only run when a pull request is approved
-    if: github.event.review.state == 'approved'
+    # Only run when a pull request is approved by a contributor
+    if: github.event.review.state == 'approved' && (github.event.review.author_association == 'COLLABORATOR' || github.event.review.author_association == 'MEMBER' || github.event.review.author_association == 'OWNER')
     runs-on: ubuntu-latest
 
     steps:
@@ -31,15 +31,15 @@ jobs:
         env:
           # OpenAI configuration
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || 'sk-test-placeholder-key-for-ci' }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || '' }}
-          OPENAI_MODEL_NAME: ${{ secrets.OPENAI_MODEL_NAME || 'gpt-4o' }}
-          OPENAI_TEMPERATURE: ${{ secrets.OPENAI_TEMPERATURE || '0.7' }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || '' }}
+          OPENAI_MODEL_NAME: ${{ vars.OPENAI_MODEL_NAME || 'gpt-4o' }}
+          OPENAI_TEMPERATURE: ${{ vars.OPENAI_TEMPERATURE || '0.7' }}
           # Server configuration
-          PORT: ${{ secrets.PORT || '8080' }}
-          HOST: ${{ secrets.HOST || '0.0.0.0' }}
-          LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
+          PORT: ${{ vars.PORT || '8080' }}
+          HOST: ${{ vars.HOST || '0.0.0.0' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           # Application configuration
-          LOCAL_TOOLS_ENABLED: ${{ secrets.LOCAL_TOOLS_ENABLED || 'true' }}
-          MAX_TURNS: ${{ secrets.MAX_TURNS || '25' }}
+          LOCAL_TOOLS_ENABLED: ${{ vars.LOCAL_TOOLS_ENABLED || 'true' }}
+          MAX_TURNS: ${{ vars.MAX_TURNS || '25' }}
         run: |
           uv run main.py --one_shot=1
