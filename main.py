@@ -6,6 +6,7 @@ import signal
 import sys
 from contextlib import asynccontextmanager
 
+import jinja2
 from agents import (
     Agent,
     AsyncOpenAI,
@@ -166,6 +167,7 @@ async def main():
             return
 
         app_logger.info("Running orchestrator agent...")
+        app_logger.debug(f"Orchestrator instructions: {orchestrator_instructions}")
 
         # Pass the config as context for future extensibility
         result = Runner.run_streamed(agent, orchestrator_instructions, context=config)
@@ -193,9 +195,36 @@ async def main():
         if config.one_shot:
             app_logger.info("One-shot mode: Checking server readiness...")
             await asyncio.sleep(2)  # Give the server a moment to be ready
-            await wait_for_server(f"http://localhost:{config.port}", timeout=20)
+            if not await wait_for_server(
+                f"http://localhost:{config.port}", timeout=20
+            ):
+                app_logger.error("Server failed to start, aborting one-shot tests.")
+                return
 
             import aiohttp
+
+            # Pre-warm the application to initialize database, etc.
+            prewarm_url = f"http://localhost:{config.port}/_prewarm"
+            app_logger.info(f"Pre-warming application at {prewarm_url}")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        prewarm_url,
+                        timeout=aiohttp.ClientTimeout(total=300),
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status == 302:
+                            app_logger.info(
+                                f"Pre-warm successful with redirect to {response.headers.get('Location')}."
+                            )
+                        else:
+                            response_text = await response.text()
+                            app_logger.warning(
+                                f"Pre-warm returned status {response.status}, proceeding anyway. "
+                                f"Response: {response_text[:200]}"
+                            )
+            except Exception as e:
+                app_logger.error(f"Pre-warm request failed: {e}")
 
             app_logger.info(
                 f"Server is ready! Making {config.one_shot} test request(s) to http://localhost:{config.port}/"

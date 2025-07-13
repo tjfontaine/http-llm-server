@@ -6,6 +6,7 @@ import sys
 import uuid
 from datetime import datetime
 
+import jinja2
 import yaml
 from mcp.server.fastmcp.server import Context, FastMCP
 from mcp.types import TextContent
@@ -66,6 +67,7 @@ async def create_web_resource(
     web_app_file: str = None,
 ) -> TextContent:
     """Creates a web resource and returns its unique ID."""
+    logger.debug(f"create_web_resource called with mcp_servers={mcp_servers}")
     try:
         logger.debug(
             f"Creating web resource: port={port}, host={host}, "
@@ -179,6 +181,7 @@ async def setup_web_application(
     Sets up the web application environment by creating and starting a WebServer.
     This is a high-level tool that combines multiple steps into one operation.
     """
+    logger.debug(f"setup_web_application called with web_app_file={web_app_file}, port={port}, enable_local_tools={enable_local_tools}, log_level={log_level}")
     resource_id = None
     try:
         if not os.path.exists(web_app_file):
@@ -206,55 +209,41 @@ async def setup_web_application(
             )
 
         # Check for YAML front matter for additional MCP servers
+        logger.debug(f"Reading web app file: {web_app_file}")
         with open(web_app_file, "r") as f:
             content = f.read()
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) > 2:
-                    front_matter_str = parts[1]
-                    front_matter = yaml.safe_load(front_matter_str)
-                    if "mcp_servers" in front_matter:
-                        additional_servers = front_matter["mcp_servers"]
-                        if isinstance(additional_servers, list):
-                            logger.debug(
-                                f"Found {len(additional_servers)} additional MCP "
-                                "servers in web app file"
-                            )
-                            # Validate each server config
-                            for i, server_config in enumerate(additional_servers):
-                                if not isinstance(server_config, dict):
-                                    logger.warning(
-                                        f"MCP server config {i} is not a dict, "
-                                        f"skipping: {server_config}"
-                                    )
-                                    continue
-                                if "type" not in server_config:
-                                    logger.warning(
-                                        f"MCP server config {i} missing 'type' field, "
-                                        f"skipping: {server_config}"
-                                    )
-                                    continue
-                                mcp_servers.append(server_config)
 
-                                # Resolve template variables like {project_root}
-                                project_root = os.path.abspath(
-                                    os.path.join(os.path.dirname(__file__), "..", "..")
-                                )
-                                if "cwd" in server_config:
-                                    original_cwd = server_config["cwd"]
-                                    server_config["cwd"] = original_cwd.format(
-                                        project_root=project_root
-                                    )
-                                    if original_cwd != server_config["cwd"]:
-                                        logger.debug(
-                                            f"Resolved template: {original_cwd} -> "
-                                            f"{server_config['cwd']}"
-                                        )
-                        else:
-                            logger.warning(
-                                "mcp_servers in YAML front matter is not a list, "
-                                "skipping"
-                            )
+        web_app_dir = os.path.dirname(os.path.abspath(web_app_file))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+
+        template = jinja2.Template(content)
+        rendered_content = template.render(
+            WEB_APP_DIR=web_app_dir, project_root=project_root
+        )
+
+        logger.debug(
+            f"Web app file content starts with: {rendered_content[:100]}..."
+        )
+        if rendered_content.startswith("---"):
+            parts = rendered_content.split("---", 2)
+            if len(parts) > 2:
+                front_matter_str = parts[1]
+                front_matter = yaml.safe_load(front_matter_str)
+                if "mcp_servers" in front_matter:
+                    additional_servers = front_matter["mcp_servers"]
+                    if isinstance(additional_servers, list):
+                        logger.debug(
+                            f"Found {len(additional_servers)} additional MCP "
+                            "servers in web app file"
+                        )
+                        mcp_servers.extend(additional_servers)
+                    else:
+                        logger.warning(
+                            "mcp_servers in YAML front matter is not a list, "
+                            "skipping"
+                        )
 
         # Now, create and start the web resource with the collected MCP servers
         create_result = await create_web_resource(

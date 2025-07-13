@@ -129,18 +129,6 @@ class StreamingContext:
                 "Stream finished but HTTP response headers were not finalized",
                 extra={"client_address": self.client_address_str},
             )
-
-            # Log the collected text for debugging purposes
-            log_text = self.llm_response_fully_collected_text_for_log
-            log_snippet = f"{log_text[:200]}{'...' if len(log_text) > 200 else ''}"
-            app_logger.debug(
-                "Full text collected before parsing headers",
-                extra={
-                    "client_address": self.client_address_str,
-                    "snippet": log_snippet,
-                },
-            )
-
             # One last attempt to parse, in case headers arrived but no separator
             if (
                 self.separator not in self.body_buffer
@@ -154,18 +142,6 @@ class StreamingContext:
                 # Treat the whole buffer as headers, with an empty body
                 await self._parse_and_prepare_response(self.body_buffer, "")
                 self.body_buffer = ""  # Clear buffer as it's now processed
-
-        if not self.response.prepared:
-            app_logger.error(
-                "Stream ended without valid HTTP headers",
-                extra={
-                    "client_address": self.client_address_str,
-                    "buffer_snippet": (
-                        f"{self.body_buffer[:500]}"
-                        f"{'...' if len(self.body_buffer) > 500 else ''}"
-                    ),
-                },
-            )
 
         # Prepare metrics dictionary
         metrics = {

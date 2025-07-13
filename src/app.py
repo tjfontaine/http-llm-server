@@ -276,8 +276,98 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             500,
             "Internal Server Error",
             "LLM did not produce a valid HTTP response.",
+            llm_response=metrics["llm_response_fully_collected_text_for_log"],
         )
     else:
         app_logger.debug(f"[{client_address_str}] Successfully streamed LLM response")
 
     return response
+
+async def on_startup(app: web.Application):
+    """
+    Application startup handler.
+
+    This function is called once when the aiohttp application starts.
+    It's responsible for initializing resources that are shared across
+    all requests.
+    """
+    # Load configuration
+    config = app["config"]
+
+    # Re-configure logging with the final log level from config
+    configure_logging(config.log_level)
+    global app_logger
+    app_logger, _, _ = get_loggers()
+
+    app_logger.info(
+        "Application starting up...",
+        extra={
+            "log_level": config.log_level,
+            "debug_mode": config.debug,
+            "model": config.openai_model_name,
+        },
+    )
+
+    # Initialize global state
+    app["global_state"] = {}
+
+    # Load default system prompt if not already set
+    if not config.system_prompt_template:
+        try:
+            with open("src/prompts/system.md", "r", encoding="utf-8") as f:
+                config.system_prompt_template = f.read()
+        except FileNotFoundError:
+            app_logger.warning(
+                "Default system prompt 'src/prompts/system.md' not found."
+            )
+
+    # Load debug panel prompt if debug mode is enabled
+    if config.debug:
+        try:
+            with open("src/prompts/debug.md", "r", encoding="utf-8") as f:
+                app["debug_panel_prompt"] = f.read()
+        except FileNotFoundError:
+            app_logger.warning("Debug panel prompt 'src/prompts/debug.md' not found.")
+            app["debug_panel_prompt"] = ""
+
+    # Load web app rules if a web app file is specified
+    if config.web_app_file:
+        try:
+            with open(config.web_app_file, "r", encoding="utf-8") as f:
+                config.web_app_rules = f.read()
+        except FileNotFoundError:
+            app_logger.warning(
+                f"Web app rules file not found: {config.web_app_file}"
+            )
+
+    # Load error prompt template
+    try:
+        with open("src/prompts/error.md", "r", encoding="utf-8") as f:
+            app["error_llm_system_prompt_template"] = jinja2.Template(f.read())
+    except FileNotFoundError:
+        app_logger.error("Error prompt template 'src/prompts/error.md' not found.")
+        app["error_llm_system_prompt_template"] = None
+
+    # Initialize the agent
+    app["agent"] = app.get("agent")
+    if not app["agent"]:
+        raise RuntimeError("Agent not initialized by orchestrator")
+
+    app_logger.info("Application startup complete.")
+
+
+async def on_shutdown(app: web.Application):
+    """
+    Application shutdown handler.
+
+    This function is called once when the aiohttp application is shutting down.
+    It's responsible for cleaning up any resources that were created on startup.
+    """
+    app_logger.info("Application shutting down...")
+
+    # Close the agent's resources
+    agent = app.get("agent")
+    if agent:
+        await agent.close()
+
+    app_logger.info("Application shutdown complete.")

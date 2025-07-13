@@ -46,6 +46,7 @@ async def send_llm_error_response_aiohttp(
     status_code: int,
     message: str,
     error_details: str,
+    llm_response: str | None = None,
 ) -> web.Response:
     """
     Generates and sends a styled error page using an LLM.
@@ -60,6 +61,9 @@ async def send_llm_error_response_aiohttp(
     Returns:
         An aiohttp Response object with the error page
     """
+    if llm_response:
+        error_details += f"\n\nLLM Response:\n{llm_response}"
+
     if not agent:
         app_logger.warning(
             "Agent not available for LLM-generated error page. Falling back."
