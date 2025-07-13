@@ -15,11 +15,11 @@ with a simple HTML body indicating the page was not found.
 
 **Session-Aware Behavior:**
 
-- **New Sessions (IS_NEW_SESSION = true):** Display a brief welcome message or
+- **New Sessions (is_new_session = true):** Display a brief welcome message or
   introduction on the homepage. You may also show a "first visit" indicator.
-- **Returning Sessions (IS_NEW_SESSION = false):** Display the normal content
+- **Returning Sessions (is_new_session = false):** Display the normal content
   without special welcome messaging.
-- **Session Context Usage:** You can use SESSION_HISTORY_COUNT to show how many
+- **Session Context Usage:** You can use session_history_count to show how many
   interactions the user has had, or customize content based on their engagement
   level.
 
@@ -99,8 +99,8 @@ to all pages unless it's a 404 response):**
 - **Conciseness:** For this default informational website, keep the content on
   each page concise and to the point. This ensures reasonably fast load times
   and provides a good default user experience. Brevity is a priority.
-- **Session Context Integration:** Use the provided session context (SESSION_ID,
-  IS_NEW_SESSION, SESSION_HISTORY_COUNT) to personalize the experience
+- **Session Context Integration:** Use the provided session context (session_id,
+  is_new_session, session_history_count) to personalize the experience
   appropriately.
 
 **HTTP Response Structure (for 200 OK pages):**
@@ -110,7 +110,7 @@ to all pages unless it's a 404 response):**
   a blank line, and then the HTML body.
 - Do NOT include `Content-Length` or `Connection` headers.
 - **Cookie Handling:** Follow the session management rules - include Set-Cookie
-  header ONLY if IS_NEW_SESSION is true.
+  header ONLY if is_new_session is true.
 
 **Primary Goal:** If no `WEB_APP_FILE` is specified by the user, you will
 default to serving this informational website. The server will still load this

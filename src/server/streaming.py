@@ -1,6 +1,5 @@
 # src/server/streaming.py
 import asyncio
-import json
 from typing import Any, AsyncGenerator
 
 from agents import Agent
@@ -121,6 +120,8 @@ class StreamingContext:
             elif isinstance(event, RunItemStreamEvent):
                 if event.name == "tool_called":
                     await self.handle_tool_calls(event.item)
+                elif event.name == "tool_output":
+                    await self.handle_tool_results(event.item)
 
         # After the stream finishes, handle any remaining buffered content
         if not self.response.prepared:
@@ -194,23 +195,50 @@ class StreamingContext:
             raw_tool_call = item.raw_item
             if hasattr(raw_tool_call, "function"):
                 if raw_tool_call.function:
-                    if raw_tool_call.function.name == "assign_session_id":
-                        args = json.loads(raw_tool_call.function.arguments)
-                        new_id = args.get("session_id")
-                        if new_id:
-                            app_logger.info(
-                                "Session ID assigned via tool call, setting cookie.",
-                                extra={"session_id": new_id},
-                            )
-                            self.session_id_from_tool_call = new_id
-                            # Set the cookie directly on the response object
-                            self.response.set_cookie(
-                                "session_id",
-                                new_id,
-                                httponly=True,
-                                samesite="Lax",
-                                path="/",
-                            )
+                    if raw_tool_call.function.name == "create_session":
+                        # The create_session tool returns the new session ID directly
+                        # We need to extract it from the result when it's available
+                        # For now, we'll handle this in the tool result processing
+                        pass
+        return None
+
+    async def handle_tool_results(self, item: RunItem):
+        """Handle tool results, specifically looking for create_session results."""
+        app_logger.debug(
+            "Handling tool results",
+            extra={
+                "client_address": self.client_address_str,
+                "item": item,
+            },
+        )
+        # Import here to avoid circular imports
+        from agents.items import ToolCallOutputItem
+
+        if isinstance(item, ToolCallOutputItem):
+            # Check if this is a result from create_session tool
+            if hasattr(item, "tool_call_item") and item.tool_call_item:
+                tool_call = item.tool_call_item
+                if hasattr(tool_call, "raw_item") and tool_call.raw_item:
+                    func = tool_call.raw_item.function
+                    if hasattr(tool_call.raw_item, "function") and func:
+                        if tool_call.raw_item.function.name == "create_session":
+                            # Extract the session ID from the tool output
+                            session_id = str(item.output).strip()
+                            if session_id:
+                                app_logger.info(
+                                    "Session ID created via tool result, "
+                                    "setting cookie.",
+                                    extra={"session_id": session_id},
+                                )
+                                self.session_id_from_tool_call = session_id
+                                # Set the cookie directly on the response object
+                                self.response.set_cookie(
+                                    "session_id",
+                                    session_id,
+                                    httponly=True,
+                                    samesite="Lax",
+                                    path="/",
+                                )
         return None
 
     async def process_chunk(self, chunk: str):

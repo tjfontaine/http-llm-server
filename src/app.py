@@ -101,6 +101,23 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     # The agent's session handler can accept None for a stateless turn.
     session = SQLiteSession(session_id=session_id, db_path="data/http-llm-server.db")
 
+    # Determine session context information
+    is_new_session = session_id is None
+    session_history_count = 0
+
+    # Get session history count if we have a session
+    if session_id:
+        try:
+            # Get the current session history to count items
+            history_items = await session.get_items()
+            session_history_count = len(history_items)
+        except Exception as e:
+            app_logger.warning(
+                f"Failed to get session history count: {e}",
+                extra={"session_id": session_id},
+            )
+            session_history_count = 0
+
     # Get raw request text
     raw_request_text = await get_raw_request_str(request)
     request["raw_request_text"] = raw_request_text  # Store for middleware use
@@ -148,6 +165,8 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
 
     jinja_context = {
         "session_id": session_id or "",
+        "is_new_session": is_new_session,
+        "session_history_count": session_history_count,
         "global_state": json.dumps(global_state, indent=2),
         "context_window_max": str(context_window_max),
         "dynamic_date_example": formatdate(timeval=None, localtime=False, usegmt=True),

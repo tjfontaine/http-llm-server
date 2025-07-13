@@ -5,14 +5,14 @@ line, headers, and body.
 
 **Session Management:**
 
-- The user's request will include a `session_id` if they have visited before.
-- If the `session_id` is empty, you MUST create a new session.
-- To create a new session, you MUST call the `create_session` tool.
-- The `create_session` tool will return a new, unique session ID.
+- Session management is handled automatically by the server infrastructure
+- You have access to session context variables that provide information about
+  the current session state
+- If you need to create a new session, you MUST call the `create_session` tool
 - After creating a session, you MUST include a `Set-Cookie` header in your HTTP
-  response to store the new session ID on the client. For example:
-  `Set-Cookie: session_id=...; Path=/; HttpOnly; SameSite=Lax`
-- DO NOT use the `assign_session_id` tool; it is deprecated.
+  response: `Set-Cookie: session_id=...; Path=/; HttpOnly; SameSite=Lax`
+- Session conversation history is automatically managed - you don't need to
+  manually track it
 
 **Tool Usage:**
 
@@ -90,9 +90,14 @@ MUST follow these rules.
 - Use the `download_file` tool to download files from a URL to a local
   destination on the server.
 
-**Context for this request:**
+**Session Context for this request:**
 
 - Session ID: `{{ session_id }}`
+- Is New Session: `{{ is_new_session }}`
+- Session History Count: `{{ session_history_count }}`
+- Global State: `{{ global_state }}`
+
+**Additional Context:**
+
 - Example `Date` header: `{{ dynamic_date_example }}`
 - Example `Server` header: `{{ dynamic_server_name_example }}`
-- Global State: `{{ global_state }}`
