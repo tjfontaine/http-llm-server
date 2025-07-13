@@ -171,8 +171,8 @@ class StreamingContext:
             raw_tool_call = item.raw_item
             if hasattr(raw_tool_call, "function") and raw_tool_call.function:
                 function_name = getattr(raw_tool_call.function, "name", "unknown")
-                # Log tool call at INFO level with function name
-                app_logger.info(
+                # Log tool call at DEBUG level with function name
+                app_logger.debug(
                     "Tool called",
                     extra={
                         "function_name": function_name,
