@@ -10,6 +10,7 @@ jobs:
     # Only run when a pull request is approved by a contributor
     if: github.event.review.state == 'approved' && (github.event.review.author_association == 'COLLABORATOR' || github.event.review.author_association == 'MEMBER' || github.event.review.author_association == 'OWNER')
     runs-on: ubuntu-latest
+    environment: "pr tests"
 
     steps:
       - name: Checkout code
