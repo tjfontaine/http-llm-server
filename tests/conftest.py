@@ -450,7 +450,7 @@ async def client(aiohttp_client, mock_openai_server):
     await server.start()
     test_client = await aiohttp_client(server.app)
     yield test_client
-    await server.cleanup()
+    await server.cleanup(force=True)
 
 
 @pytest_asyncio.fixture
@@ -483,4 +483,4 @@ async def client_with_dspy(aiohttp_client, mock_openai_server_with_dspy):
     await server.start()
     test_client = await aiohttp_client(server.app)
     yield test_client
-    await server.stop()
+    await server.cleanup(force=True)

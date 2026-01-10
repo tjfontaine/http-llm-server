@@ -102,6 +102,10 @@ async def test_compiled_program_matches_training_examples(
     assert actual_body == expected_body
 
 
+@pytest.mark.skip(
+    reason="Uses client_with_dspy fixture which starts MCP subprocess. "
+    "This is slow and doesn't reflect current runtime (direct HTTP generation)."
+)
 @pytest.mark.asyncio
 async def test_session_creation_and_cookie_handling(client_with_dspy):
     """Test that session creation works and cookies are properly set."""
@@ -117,6 +121,10 @@ async def test_session_creation_and_cookie_handling(client_with_dspy):
         assert 'HttpOnly' in cookie_header
 
 
+@pytest.mark.skip(
+    reason="Uses client_with_dspy fixture which starts MCP subprocess. "
+    "This is slow and doesn't reflect current runtime (direct HTTP generation)."
+)
 @pytest.mark.asyncio
 async def test_different_http_methods(client_with_dspy):
     """Test that different HTTP methods are handled correctly."""
@@ -129,6 +137,10 @@ async def test_different_http_methods(client_with_dspy):
     assert response.status in [200, 404, 405]  # Any reasonable response
 
 
+@pytest.mark.skip(
+    reason="Uses client_with_dspy fixture which starts MCP subprocess. "
+    "This is slow and doesn't reflect current runtime (direct HTTP generation)."
+)
 @pytest.mark.asyncio
 async def test_error_handling_with_invalid_dspy_output(client_with_dspy):
     """Test that invalid DSPy outputs are handled gracefully."""

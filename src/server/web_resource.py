@@ -276,13 +276,33 @@ class WebServer:
         if self.runner:
             await self.runner.cleanup()
 
-    async def cleanup(self):
+    async def cleanup(self, force: bool = False):
+        """Clean up server resources.
+        
+        Args:
+            force: If True, skip MCP server cleanup to avoid cancel scope issues.
+                   MCP subprocesses will be terminated when the process exits.
+        """
         await self.stop()
+        
+        if force:
+            # In tests, just clear the list without calling __aexit__
+            # The subprocess will be killed when the test process exits
+            self.mcp_server_lifecycles.clear()
+            return
+        
+        # For graceful shutdown, try to close MCP servers
+        # but catch and log any cancel scope errors
         for server in self.mcp_server_lifecycles:
             try:
+                # Try to close gracefully
                 await server.__aexit__(None, None, None)
             except RuntimeError as e:
-                # Suppress anyio cancel scope errors during cleanup
-                # This happens when MCP client is cleaned up from a different task
-                app_logger.debug(f"MCP server cleanup warning (safe to ignore): {e}")
+                if "cancel scope" in str(e).lower():
+                    # This is expected when cleanup is called from a different task
+                    app_logger.debug(f"MCP server cleanup skipped (cancel scope issue): {e}")
+                else:
+                    app_logger.warning(f"MCP server cleanup error: {e}")
+            except Exception as e:
+                app_logger.warning(f"Unexpected MCP cleanup error: {e}")
         self.mcp_server_lifecycles.clear()
