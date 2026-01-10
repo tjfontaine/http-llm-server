@@ -1,8 +1,12 @@
 import json
+import sys
 from typing import Any, Dict, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Disable CLI parsing when running under pytest to avoid argument conflicts
+_running_under_pytest = "pytest" in sys.modules
 
 
 class McpServerConfig(BaseSettings):
@@ -27,7 +31,7 @@ class Config(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        cli_parse_args=True,
+        cli_parse_args=not _running_under_pytest,
         cli_prog_name="http-llm-server",
     )
 

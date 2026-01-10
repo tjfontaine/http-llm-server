@@ -34,13 +34,9 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.fastmcp.server import FastMCP as Server
 from mcp.types import CallToolResult, TextContent
 
-from src.logging_config import configure_logging
-
 # A server instance is created globally, and tools are registered against it.
 local_mcp_server = Server(
-    "local-tools-server",
-    title="Local Tools Server",
-    description="Provides tools for session and state management.",
+    name="local-tools-server",
 )
 
 
@@ -169,6 +165,53 @@ async def download_file(
 
     raise ValueError(error_msg)
 
+@local_mcp_server.tool()
+async def generate_http_response(
+    context: Context, context_str: str, http_request: str
+) -> CallToolResult:
+    """
+    Generates an HTTP response using the compiled DSPy program.
+    
+    Args:
+        context_str: The context string for the request (e.g., global state info)
+        http_request: The raw HTTP request string
+    """
+    logging.info("generate_http_response tool called!")
+    logging.info(f"context_str: {context_str}")
+    logging.info(f"http_request: {http_request}")
+    
+    # Check if global_state exists on the server instance
+    compiled_program = None
+    if hasattr(local_mcp_server, 'global_state'):
+        compiled_program = local_mcp_server.global_state.get("compiled_http_program")
+        logging.info(f"compiled_program: {compiled_program}")
+    else:
+        logging.info("No global_state found on local_mcp_server")
+    
+    if compiled_program:
+        try:
+            # Use the compiled DSPy program with parameter names matching signature
+            result = compiled_program(context=context_str, http_request=http_request)
+            http_response = result.http_response
+            logging.info(f"DSPy generated response: {http_response}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=http_response)]
+            )
+        except Exception as e:
+            logging.error(f"Error running DSPy program: {e}")
+            # Fall through to fallback
+    
+    # Fallback response if DSPy program is not available or failed
+    fallback_response = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "\r\n"
+        "Hello, world!"
+    )
+    logging.info(f"Using fallback response: {fallback_response}")
+    return CallToolResult(
+        content=[TextContent(type="text", text=fallback_response)]
+    )
 
 def create_local_tools_stdio_server(
     global_state: dict,
@@ -191,8 +234,18 @@ def create_local_tools_stdio_server(
 
 async def main():
     """Main function to run the MCP server with stdio transport."""
+    # MCP stdio transport uses stdout for JSONRPC - logging MUST go to stderr
+    import sys
     log_level = os.environ.get("LOCAL_TOOLS_LOG_LEVEL", "INFO")
-    configure_logging(log_level)
+    
+    # Configure basic logging to stderr (not stdout) to avoid corrupting JSONRPC
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    logging.root.handlers.clear()
+    logging.root.addHandler(handler)
+    logging.root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
     logging.info("Starting local tools MCP server")
 

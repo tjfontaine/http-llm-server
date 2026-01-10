@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 dependencies = [
-    "openai>=1.90.0",
+    "openai>=2.14.0",
     "aiohttp>=3.12.13",
     "aiofiles>=24.1.0",
     "ruff>=0.12.0",
@@ -27,13 +27,25 @@ dependencies = [
     "uvicorn>=0.34.3",
     "python-dotenv>=1.1.0",
     "jinja2>=3.1.6",
-    "openai-agents==0.2.11",
+    "openai-agents>=0.6.2",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.0",
+    "dspy-ai>=3.1.0",
 ]
 
-[project.scripts]
-start_server = "src.app:create_app"
+[project.optional-dependencies]
+dev = [
+    "pytest<=8.4.2",
+    "pytest-asyncio>=0.24.0",
+    "pytest-aiohttp>=1.1.0",
+]
+
+# [project.scripts]
+# start_server = "src.app:create_app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.ruff]
 line-length = 88
@@ -45,5 +57,9 @@ select = ["E", "F", "I"]
 [tool.ruff.format]
 exclude = ["vendor"]
 
-[tool.uv.sources]
-openai-agents = { path = "vendor/openai-agents-python" }
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+

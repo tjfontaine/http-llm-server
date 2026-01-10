@@ -106,6 +106,13 @@ phases:
     established the two-tiered model where one AI manages the environment for
     another.
 
+4.  **DSPy Integration for Response Generation:** We've integrated DSPy to provide a more robust and programmatic approach to HTTP response generation. Instead of direct prompting, the Application AI now leverages a compiled DSPy program (`HttpProgram`) for this task. This allows for: 
+    - **Programmatic LLM Interactions:** DSPy modules define clear input/output signatures, making LLM calls more structured and reliable. 
+    - **Optimization and Consistency:** The `HttpProgram` is compiled using `dspy.optimizers.BootstrapFewShot` with a training dataset during server startup. This optimization process improves the quality and consistency of generated HTTP responses by learning from examples. 
+    - **Clean Separation of Concerns:** The Application AI now orchestrates tool calls and then delegates the final HTTP response generation to the specialized DSPy program via the `generate_http_response` tool. 
+    
+    **Note:** The interim Phase 2 direct-DSPy handler was skipped in favor of going straight to tool-based integration for cleaner separation of concerns. 
+
 This architecture is what enables the new paradigm. The Orchestrator is the
 bootloader for a generative, AI-powered web application.
 
@@ -127,6 +134,22 @@ bootloader for a generative, AI-powered web application.
     ```bash
     uv run main.py --web_app_file examples/simple_blog/prompt.md
     ```
+
+## Testing
+
+This project uses `pytest` for its test suite. To run the tests, you first need to install the test dependencies:
+
+```bash
+uv pip install -e .[dev]
+```
+
+Once the dependencies are installed, you can run the test suite with:
+
+```bash
+uv run test
+```
+
+The tests are located in the `tests/` directory and follow a Test-Driven Development (TDD) approach. The integration tests use a mock OpenAI server to ensure deterministic behavior and validate the DSPy integration.
 
 ### Configuration
 

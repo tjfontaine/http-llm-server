@@ -33,15 +33,21 @@ import time
 from email.utils import formatdate
 
 import jinja2
-from agents import Runner
-from agents.memory.session import SQLiteSession
 from aiohttp import web
+from agents import Runner
 
 from src.config import Config
 from src.logging_config import configure_logging, get_loggers
 from src.server.errors import send_llm_error_response_aiohttp
 from src.server.parsing import get_raw_request_str
-from src.server.streaming import LLMResponseStreamer
+from src.server.streaming import StreamingContext
+
+# Initialize Jinja2 environment
+jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader("."),
+    autoescape=jinja2.select_autoescape(["html", "xml"]),
+)
+
 
 # Initialize Jinja2 environment
 jinja_env = jinja2.Environment(
@@ -99,14 +105,15 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
         )
 
     # The agent's session handler can accept None for a stateless turn.
-    session = SQLiteSession(session_id=session_id, db_path="data/http-llm-server.db")
+    # session = SQLiteSession(session_id=session_id, db_path="data/http-llm-server.db")
+    session = None
 
     # Determine session context information
     is_new_session = session_id is None
     session_history_count = 0
 
     # Get session history count if we have a session
-    if session_id:
+    if False and session_id:
         try:
             # Get the current session history to count items
             history_items = await session.get_items()
@@ -232,54 +239,21 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "length": len(dynamic_system_prompt),
         },
     )
-    # app_logger.debug(
-    #     f"[{client_address_str}] Messages: {len(messages)} total, roles: "
-    #     f"{[msg.get('role', 'unknown') for msg in messages]}"
-    # )
 
-    # Run the LLM stream
-    agent_stream = Runner.run_streamed(
-        cloned_agent,
-        raw_request_text,
-        max_turns=max_turns,
-        session=session if session.session_id else None,
+    # Start the agent runner with streaming
+    runner_result = Runner.run_streamed(cloned_agent, raw_request_text)
+    
+    # Use the streaming context to handle the response
+    streaming_context = StreamingContext(request, cloned_agent)
+    response, metrics = await streaming_context.stream_agent_response(runner_result)
+    
+    # Store metrics for middleware
+    request["llm_response_fully_collected_text_for_log"] = (
+        streaming_context.llm_response_fully_collected_text_for_log
     )
-
-    # Delegate streaming to the dedicated streamer class
-    streamer = LLMResponseStreamer(client_address_str)
-    response, final_session_id_for_turn, metrics = await streamer.stream_response(
-        request, agent_stream, max_turns, session_id
+    request["model_error_indicator_for_recording"] = (
+        streaming_context.model_error_indicator_for_recording
     )
-
-    # Store metrics and session data on request for middleware use
-    request["llm_response_fully_collected_text_for_log"] = metrics[
-        "llm_response_fully_collected_text_for_log"
-    ]
-    request["model_error_indicator_for_recording"] = metrics[
-        "model_error_indicator_for_recording"
-    ]
-    request["last_chunk_finish_reason"] = metrics["_last_chunk_finish_reason"]
-    request["prompt_tokens_from_usage"] = metrics["prompt_tokens_from_usage"]
-    request["completion_tokens_from_usage"] = metrics["completion_tokens_from_usage"]
-    request["llm_first_token_time"] = metrics["llm_first_token_time"]
-    request["llm_stream_end_time"] = metrics["llm_stream_end_time"]
-    request["final_session_id_for_turn"] = final_session_id_for_turn
-
-    # Validate response
-    if not response.prepared:
-        app_logger.warning(
-            f"[{client_address_str}] LLM stream finished with no HTTP headers."
-        )
-        return await send_llm_error_response_aiohttp(
-            request,
-            agent,
-            500,
-            "Internal Server Error",
-            "LLM did not produce a valid HTTP response.",
-            llm_response=metrics["llm_response_fully_collected_text_for_log"],
-        )
-    else:
-        app_logger.debug(f"[{client_address_str}] Successfully streamed LLM response")
 
     return response
 

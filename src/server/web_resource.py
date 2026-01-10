@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import sys
 from typing import TYPE_CHECKING
 
+import dspy
+from dspy.teleprompt import BootstrapFewShot
 from agents import (
     Agent,
     AsyncOpenAI,
@@ -21,6 +24,8 @@ from aiohttp import web
 from src.app import handle_http_request
 from src.config import Config, McpServerConfig
 from src.logging_config import get_loggers
+from src.dspy_module import HttpProgram
+from src.training_data import training_data
 from src.server.middleware import (
     error_handling_middleware,
     logging_and_metrics_middleware,
@@ -45,12 +50,14 @@ class WebServer:
         mcp_servers_config: list = [],
         log_level: str = "INFO",
         web_app_file: str = None,
+        config: Config = None,
     ):
         self.port = port
         self.host = host
         self.mcp_servers_config = mcp_servers_config
         self.log_level = log_level
         self.web_app_file = web_app_file
+        self.config = config
         # Note: Logging is configured by core_services.py main() for the subprocess
 
         # Enable verbose agents library logging if TRACE level is requested
@@ -70,23 +77,28 @@ class WebServer:
         self.agent: Agent | None = None
         self.mcp_server_lifecycles: list = []
 
-    async def initialize_agent(self, config: Config):
+    async def initialize_agent(self):
         """
         Initialize MCP servers based on configuration and create an agent with them.
         """
+        config = self.app.get('config') or self.config
+        if not config:
+            raise ValueError("Configuration not found in WebServer or app context.")
+
         mcp_servers = []
 
         # Initialize external MCP servers from typed config
-        if self.mcp_servers_config:
+        mcp_servers_config = getattr(config, 'mcp_servers_config', None) or config.mcp_servers or []
+        if mcp_servers_config:
             app_logger.debug(
                 "Processing %d MCP server configurations...",
-                len(self.mcp_servers_config),
+                len(mcp_servers_config),
             )
-            for i, mcp_cfg_dict in enumerate(self.mcp_servers_config):
+            for i, mcp_cfg_dict in enumerate(mcp_servers_config):
                 app_logger.debug(
                     "Processing MCP server %d/%d: %s",
                     i + 1,
-                    len(self.mcp_servers_config),
+                    len(mcp_servers_config),
                     mcp_cfg_dict,
                 )
                 mcp_config = McpServerConfig(**mcp_cfg_dict)
@@ -186,12 +198,54 @@ class WebServer:
         app_logger.info(f"Agent initialized with {len(mcp_servers)} MCP server(s)")
         self.app["agent"] = self.agent
 
+        # Configure and compile DSPy program
+        app_logger.info("Compiling DSPy program...")
+        try:
+            # Skip DSPy compilation in test mode
+            if os.environ.get("SKIP_DSPY_COMPILATION") == "true":
+                app_logger.info("Skipping DSPy compilation (test mode)")
+                self.app["compiled_http_program"] = None
+            else:
+                # Ensure the model name is set for DSPy configuration
+                if not config.openai_model_name:
+                    config.openai_model_name = "gpt-3.5-turbo"
+                
+                # Configure DSPy with environment variables for base URL if set
+                base_url = os.environ.get("OPENAI_BASE_URL")
+                if base_url:
+                    dspy.configure(lm=dspy.LM(
+                        f"openai/{config.openai_model_name}", 
+                        base_url=base_url,
+                        api_key=os.environ.get("OPENAI_API_KEY", config.api_key)
+                    ))
+                else:
+                    dspy.configure(lm=dspy.LM(f"openai/{config.openai_model_name}"))
+                    
+                optimizer = BootstrapFewShot(metric=None, max_bootstrapped_demos=2)
+                compiled_http_program = optimizer.compile(
+                    HttpProgram(), trainset=training_data
+                )
+                self.app["compiled_http_program"] = compiled_http_program
+                for server in mcp_servers:
+                    if isinstance(server, MCPServerStdio):
+                        server.global_state[
+                            "compiled_http_program"
+                        ] = compiled_http_program
+                app_logger.info("DSPy program compiled successfully.")
+        except Exception as e:
+            app_logger.warning(
+                f"DSPy compilation failed: {e}. Server will use fallback responses."
+            )
+            self.app["compiled_http_program"] = None
+
     def add_route(self, path: str, handler):
         self.app.router.add_route("*", path, handler)
 
     async def start(self):
-        # Create config with web_app_file if provided
-        if self.web_app_file:
+        # Use config passed to constructor, or create new one from web_app_file
+        if self.config:
+            config = self.config
+        elif self.web_app_file:
             config = Config(web_app_file=self.web_app_file)
         else:
             config = Config()
@@ -199,11 +253,9 @@ class WebServer:
         self.app["config"] = config
         self.app["global_state"] = {}
         self.add_route("/{path:.*}", handle_http_request)
-        await self.initialize_agent(config)
+        await self.initialize_agent()
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        for server in self.mcp_server_lifecycles:
-            await server.__aenter__()
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
         app_logger.info(f"Web server started on http://{self.host}:{self.port}")
@@ -219,5 +271,10 @@ class WebServer:
     async def cleanup(self):
         await self.stop()
         for server in self.mcp_server_lifecycles:
-            await server.__aexit__(None, None, None)
+            try:
+                await server.__aexit__(None, None, None)
+            except RuntimeError as e:
+                # Suppress anyio cancel scope errors during cleanup
+                # This happens when MCP client is cleaned up from a different task
+                app_logger.debug(f"MCP server cleanup warning (safe to ignore): {e}")
         self.mcp_server_lifecycles.clear()

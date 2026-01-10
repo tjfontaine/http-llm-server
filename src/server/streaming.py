@@ -3,7 +3,7 @@ import asyncio
 from typing import Any, AsyncGenerator
 
 from agents import Agent
-from agents.items import RunItem, ToolCallItem
+from agents.items import RunItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
@@ -125,23 +125,24 @@ class StreamingContext:
 
         # After the stream finishes, handle any remaining buffered content
         if not self.response.prepared:
-            app_logger.warning(
-                "Stream finished but HTTP response headers were not finalized",
-                extra={"client_address": self.client_address_str},
-            )
-            # One last attempt to parse, in case headers arrived but no separator
-            if (
-                self.separator not in self.body_buffer
-                and self.body_buffer
-                and not self.header_section
-            ):
-                app_logger.debug(
-                    "Attempting to parse unparsed headers as headers-only response",
-                    extra={"client_address": self.client_address_str},
+            if self.body_buffer:
+                # If stream finishes with content but no headers, treat as a simple
+                # 200 OK response with the buffered content as the body.
+                app_logger.warning(
+                    "Stream finished with content but no headers. "
+                    "Serving as 200 OK with text/plain."
                 )
-                # Treat the whole buffer as headers, with an empty body
-                await self._parse_and_prepare_response(self.body_buffer, "")
-                self.body_buffer = ""  # Clear buffer as it's now processed
+                self.response.set_status(200)
+                self.response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+                await self.response.prepare(self.request)
+                await self.response.write(self.body_buffer.encode('utf-8'))
+            else:
+                # If stream finishes with no headers and no content, it's likely
+                # an error or an empty response was intended.
+                app_logger.warning(
+                    "Stream finished but HTTP response headers were not finalized "
+                    "and no content was buffered."
+                )
 
         # Prepare metrics dictionary
         metrics = {
@@ -186,64 +187,76 @@ class StreamingContext:
                     pass
         return None
 
-    async def handle_tool_results(self, item: RunItem):
-        """Handle tool results, specifically looking for create_session results."""
-        app_logger.debug(
-            "Handling tool results",
-            extra={
-                "client_address": self.client_address_str,
-                "item": item,
-            },
+    async def handle_tool_results(self, item: ToolCallOutputItem):
+        """Processes a tool result and writes it to the stream."""
+        # Extract function name from raw_item if available
+        # In openai-agents 0.6+, raw_item may be a dict or FunctionCallOutput
+        function_name = "unknown"
+        raw_item = item.raw_item
+        if isinstance(raw_item, dict):
+            function_name = raw_item.get("name", raw_item.get("call_id", "unknown"))
+        elif hasattr(raw_item, "call_id"):
+            function_name = getattr(raw_item, "call_id", "unknown")
+        
+        output = item.output
+        
+        # Debug: log the output structure
+        # print(f"DEBUG OUTPUT: type={type(output).__name__}")
+        # print(f"DEBUG OUTPUT: output={output!r}")
+        
+        # Extract text content from output
+        # The output can be:
+        # 1. A JSON string like {"type":"text","text":"...","annotations":null}
+        # 2. An object with .content[0].text
+        # 3. A plain string
+        text_content = ""
+        if isinstance(output, str):
+            # Try to parse as JSON 
+            if output.startswith("{"):
+                import json
+                try:
+                    parsed = json.loads(output)
+                    if isinstance(parsed, dict) and "text" in parsed:
+                        text_content = parsed["text"]
+                    else:
+                        text_content = output
+                except json.JSONDecodeError:
+                    text_content = output
+            else:
+                text_content = output
+        elif hasattr(output, 'content') and output.content:
+            try:
+                text_content = output.content[0].text
+            except (KeyError, IndexError, AttributeError):
+                text_content = str(output)
+        else:
+            text_content = str(output)
+        
+        app_logger.info(
+            "Tool result | function_name=%s text=%s client_address=%s",
+            function_name,
+            text_content[:100] if len(text_content) > 100 else text_content,
+            self.request.remote,
         )
-        # Import here to avoid circular imports
-        from agents.items import ToolCallOutputItem
-
-        if isinstance(item, ToolCallOutputItem):
-            # Log tool result at INFO level with function name and result
-            tool_function_name = "unknown"
+        
+        # Detect tool type by examining the extracted text content
+        # HTTP responses start with "HTTP/"
+        if text_content.startswith("HTTP/"):
+            # This is an HTTP response from generate_http_response
+            await self.process_chunk(text_content)
             
-            # Extract function name from the tool call
-            if hasattr(item, "tool_call_item") and item.tool_call_item:
-                tool_call = item.tool_call_item
-                if hasattr(tool_call, "raw_item") and tool_call.raw_item:
-                    if hasattr(tool_call.raw_item, "function") and tool_call.raw_item.function:
-                        tool_function_name = getattr(tool_call.raw_item.function, "name", "unknown")
-            
-            # Log the tool result at INFO level
+        elif len(text_content) < 100 and "-" in text_content:
+            # This looks like a session ID (UUID format)
+            session_id = text_content.strip()
+            self.session_id_from_tool_call = session_id
             app_logger.info(
-                "Tool result",
+                "Session ID extracted from tool call",
                 extra={
-                    "function_name": tool_function_name,
-                    "result": str(item.output),
+                    "session_id": session_id,
                     "client_address": self.client_address_str,
-                },
+                }
             )
-            
-            # Check if this is a result from create_session tool
-            if hasattr(item, "tool_call_item") and item.tool_call_item:
-                tool_call = item.tool_call_item
-                if hasattr(tool_call, "raw_item") and tool_call.raw_item:
-                    if hasattr(tool_call.raw_item, "function") and tool_call.raw_item.function:
-                        function_name = getattr(tool_call.raw_item.function, "name", "unknown")
-                        if function_name == "create_session":
-                            # Extract the session ID from the tool output
-                            session_id = str(item.output).strip()
-                            if session_id:
-                                app_logger.info(
-                                    "Session ID created via tool result, "
-                                    "setting cookie.",
-                                    extra={"session_id": session_id},
-                                )
-                                self.session_id_from_tool_call = session_id
-                                # Set the cookie directly on the response object
-                                self.response.set_cookie(
-                                    "session_id",
-                                    session_id,
-                                    httponly=True,
-                                    samesite="Lax",
-                                    path="/",
-                                )
-        return None
+
 
     async def process_chunk(self, chunk: str):
         # This method is crucial for on-the-fly parsing of the LLM's output.
@@ -335,7 +348,27 @@ class StreamingContext:
             # Set status and headers BEFORE preparing the response
             self.response.set_status(status_code, reason.strip())
             for key, value in headers.items():
-                self.response.headers[key] = value
+                # Skip Content-Length as aiohttp will handle it automatically
+                # for streaming responses
+                if key.lower() != 'content-length':
+                    self.response.headers[key] = value
+
+            # Set session cookie if we have a session ID from tool call
+            if self.session_id_from_tool_call:
+                self.response.set_cookie(
+                    "session_id",
+                    self.session_id_from_tool_call,
+                    httponly=True,
+                    secure=False,  # Set to True in production with HTTPS
+                    samesite="Lax"
+                )
+                app_logger.info(
+                    "Session cookie set on response",
+                    extra={
+                        "session_id": self.session_id_from_tool_call,
+                        "client_address": self.client_address_str,
+                    }
+                )
 
             # Now prepare the response
             await self.response.prepare(self.request)
