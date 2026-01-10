@@ -59,7 +59,12 @@ jinja_env = jinja2.Environment(
 config: Config = Config()
 
 # Configure logging as early as possible using the config's log level
-configure_logging(config.log_level)
+# But skip if we're in an MCP subprocess (detected via environment variables)
+# because MCP uses stdout for JSONRPC and logging to stdout corrupts the protocol
+import os
+_in_mcp_subprocess = os.environ.get("CORE_SERVICES_LOG_LEVEL") or os.environ.get("MCP_SUBPROCESS")
+if not _in_mcp_subprocess:
+    configure_logging(config.log_level)
 
 # Initialize with default logging - will be reconfigured when config is available
 app_logger, _, _ = get_loggers()

@@ -88,7 +88,8 @@ class WebServer:
         mcp_servers = []
 
         # Initialize external MCP servers from typed config
-        mcp_servers_config = getattr(config, 'mcp_servers_config', None) or config.mcp_servers or []
+        # Check self.mcp_servers_config first (passed to constructor), then fall back to config
+        mcp_servers_config = self.mcp_servers_config or getattr(config, 'mcp_servers', None) or []
         if mcp_servers_config:
             app_logger.debug(
                 "Processing %d MCP server configurations...",

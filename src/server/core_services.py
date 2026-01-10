@@ -13,7 +13,10 @@ from mcp.types import TextContent
 from rich.console import Console
 from rich.logging import RichHandler
 
-from src.server.web_resource import WebServer
+# Note: WebServer is imported lazily inside functions to prevent
+# module-level configure_logging from writing to stdout before
+# core_services sets up stderr logging.
+
 
 logger = logging.getLogger("llm_http_server_app")
 
@@ -50,11 +53,7 @@ def configure_subprocess_logging(log_level: str = "INFO"):
 # In-memory store for our web server resources
 web_servers: dict[str, dict] = {}
 
-core_services = FastMCP(
-    "core-services",
-    title="Core Services",
-    description="Provides core services for managing web application resources.",
-)
+core_services = FastMCP("core-services")
 
 
 @core_services.tool()
@@ -67,6 +66,9 @@ async def create_web_resource(
     web_app_file: str = None,
 ) -> TextContent:
     """Creates a web resource and returns its unique ID."""
+    # Lazy import to prevent module-level logging before stderr is configured
+    from src.server.web_resource import WebServer
+    
     logger.debug(f"create_web_resource called with mcp_servers={mcp_servers}")
     try:
         logger.debug(
