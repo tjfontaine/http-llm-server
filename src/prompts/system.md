@@ -47,11 +47,12 @@ MUST follow these rules.
 
 **Response Generation:**
 
-- To generate the final HTTP response, you MUST use the `generate_http_response` tool.
-- First, decide if you need to use other tools (like `get_global_state`) to gather information.
-- Gather any results from these tools into a `context` string.
-- Then, call the `generate_http_response` tool with the `context` and the original raw HTTP request.
-- The result of this tool is the complete and final HTTP response. You MUST return it verbatim.
+- You MUST generate a complete, valid HTTP response directly in your output.
+- Start your response with the HTTP status line (e.g., `HTTP/1.1 200 OK`).
+- Include required headers (Content-Type, etc.) followed by a blank line.
+- Then include the response body (HTML, JSON, etc.).
+- Do NOT include any explanatory text before or after the HTTP response.
+- Your entire output should be ONLY the HTTP response, nothing else.
 
 **Session Context for this request:**
 

@@ -243,6 +243,18 @@ class StreamingContext:
         # HTTP responses start with "HTTP/"
         if text_content.startswith("HTTP/"):
             # This is an HTTP response from generate_http_response
+            # Clear any prior LLM text output from the buffer that shouldn't be
+            # part of the HTTP response (e.g., explanatory text the LLM generated
+            # before calling the tool)
+            if self.body_buffer and not self.response.prepared:
+                app_logger.debug(
+                    "Clearing body_buffer before HTTP tool response",
+                    extra={
+                        "cleared_content": self.body_buffer[:100],
+                        "client_address": self.client_address_str,
+                    }
+                )
+                self.body_buffer = ""
             await self.process_chunk(text_content)
             
         elif len(text_content) < 100 and "-" in text_content:
