@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import dspy
 from dspy.teleprompt import BootstrapFewShot
+
+from src.dspy_metrics import http_response_metric
 from agents import (
     Agent,
     AsyncOpenAI,
@@ -222,7 +224,10 @@ class WebServer:
                 else:
                     dspy.configure(lm=dspy.LM(f"openai/{config.openai_model_name}"))
                     
-                optimizer = BootstrapFewShot(metric=None, max_bootstrapped_demos=2)
+                optimizer = BootstrapFewShot(
+                    metric=http_response_metric,
+                    max_bootstrapped_demos=3
+                )
                 compiled_http_program = optimizer.compile(
                     HttpProgram(), trainset=training_data
                 )
