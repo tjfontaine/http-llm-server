@@ -34,7 +34,7 @@ from email.utils import formatdate
 
 import jinja2
 from aiohttp import web
-from agents import Runner
+from agents import Runner, SQLiteSession
 
 from src.config import Config
 from src.logging_config import configure_logging, get_loggers
@@ -104,20 +104,33 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
             "No session ID found in cookie. Relying on LLM to create a session."
         )
 
-    # The agent's session handler can accept None for a stateless turn.
-    # session = SQLiteSession(session_id=session_id, db_path="data/http-llm-server.db")
+    # Create session for conversation history persistence
+    # The SDK automatically stores req/resp pairs and retrieves them on subsequent requests
     session = None
+    if session_id:
+        session = SQLiteSession(
+            session_id=session_id, 
+            db_path="data/http-llm-server.db"
+        )
+        app_logger.debug(
+            "Using SQLiteSession for history",
+            extra={"session_id": session_id}
+        )
 
     # Determine session context information
     is_new_session = session_id is None
     session_history_count = 0
 
     # Get session history count if we have a session
-    if False and session_id:
+    if session:
         try:
             # Get the current session history to count items
             history_items = await session.get_items()
             session_history_count = len(history_items)
+            app_logger.debug(
+                "Session history loaded",
+                extra={"session_id": session_id, "history_count": session_history_count}
+            )
         except Exception as e:
             app_logger.warning(
                 f"Failed to get session history count: {e}",
@@ -241,7 +254,7 @@ async def handle_http_request(request: web.Request) -> web.StreamResponse:
     )
 
     # Start the agent runner with streaming
-    runner_result = Runner.run_streamed(cloned_agent, raw_request_text)
+    runner_result = Runner.run_streamed(cloned_agent, raw_request_text, session=session)
     
     # Use the streaming context to handle the response
     streaming_context = StreamingContext(request, cloned_agent)
