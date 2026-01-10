@@ -115,7 +115,6 @@ class WebServer:
                             mcp_cfg_dict["module"],
                         )
                         params = {
-                            "global_state": self.app.get("global_state"),
                             "command": sys.executable,
                             "args": ["-m", mcp_cfg_dict["module"]],
                         }
@@ -123,7 +122,6 @@ class WebServer:
                         app_logger.debug("Using full stdio config")
                         # Handle full stdio config
                         params = {
-                            "global_state": self.app.get("global_state"),
                             "command": mcp_config.command,
                             "args": mcp_config.args or [],
                             "cwd": mcp_config.cwd,
@@ -143,8 +141,8 @@ class WebServer:
                     app_logger.error(f"Unsupported MCP server type: {mcp_config.type}")
                     continue
 
-                # Initialize server
-                await server.__aenter__()
+                # Initialize server using proper connect() method
+                await server.connect()
                 if server:
                     tools = await server.list_tools()
                     app_logger.debug(
@@ -285,18 +283,17 @@ class WebServer:
         """
         await self.stop()
         
-        if force:
-            # In tests, just clear the list without calling __aexit__
-            # The subprocess will be killed when the test process exits
-            self.mcp_server_lifecycles.clear()
-            return
-        
-        # For graceful shutdown, try to close MCP servers
-        # but catch and log any cancel scope errors
+        # Clean up MCP servers using their proper cleanup() method
         for server in self.mcp_server_lifecycles:
             try:
-                # Try to close gracefully
-                await server.__aexit__(None, None, None)
+                if force:
+                    # Just try cleanup without waiting for proper termination
+                    # The subprocess will be killed when the test process exits
+                    pass
+                else:
+                    # Use the server's cleanup() method which properly handles
+                    # the exit_stack.aclose() with error handling
+                    await server.cleanup()
             except RuntimeError as e:
                 if "cancel scope" in str(e).lower():
                     # This is expected when cleanup is called from a different task
@@ -304,5 +301,5 @@ class WebServer:
                 else:
                     app_logger.warning(f"MCP server cleanup error: {e}")
             except Exception as e:
-                app_logger.warning(f"Unexpected MCP cleanup error: {e}")
+                app_logger.debug(f"MCP cleanup exception (may be expected): {e}")
         self.mcp_server_lifecycles.clear()

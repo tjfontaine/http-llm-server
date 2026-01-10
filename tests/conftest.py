@@ -450,7 +450,7 @@ async def client(aiohttp_client, mock_openai_server):
     await server.start()
     test_client = await aiohttp_client(server.app)
     yield test_client
-    await server.cleanup(force=True)
+    await server.cleanup()
 
 
 @pytest_asyncio.fixture
@@ -480,7 +480,16 @@ async def client_with_dspy(aiohttp_client, mock_openai_server_with_dspy):
         config=config, 
         mcp_servers_config=[local_tools_config]
     )
-    await server.start()
-    test_client = await aiohttp_client(server.app)
-    yield test_client
-    await server.cleanup(force=True)
+    # Skip DSPy compilation in tests - it requires real LLM calls
+    old_env = os.environ.get("SKIP_DSPY_COMPILATION")
+    os.environ["SKIP_DSPY_COMPILATION"] = "true"
+    try:
+        await server.start()
+        test_client = await aiohttp_client(server.app)
+        yield test_client
+    finally:
+        if old_env is None:
+            os.environ.pop("SKIP_DSPY_COMPILATION", None)
+        else:
+            os.environ["SKIP_DSPY_COMPILATION"] = old_env
+        await server.cleanup()

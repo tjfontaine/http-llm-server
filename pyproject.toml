@@ -61,5 +61,8 @@ exclude = ["vendor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Use auto mode to allow anyio plugin to manage task context for proper cleanup
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 
