@@ -17,15 +17,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Update git submodules
-        run: |
-          git submodule update --init --recursive
       - name: Install uv
         run: pip install uv
       - name: Install dependencies
-        run: |
-          uv sync
-          uv pip install -e vendor/openai-agents-python
+        run: uv sync
       - name: Create data directory
         run: mkdir -p data
       - name: Run one shot
