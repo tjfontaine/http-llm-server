@@ -176,17 +176,28 @@ async def generate_http_response(
         context_str: The context string for the request (e.g., global state info)
         http_request: The raw HTTP request string
     """
+    import os
+    from src.dspy_module import HttpProgram
+    
     logging.info("generate_http_response tool called!")
     logging.info(f"context_str: {context_str}")
     logging.info(f"http_request: {http_request}")
     
-    # Check if global_state exists on the server instance
+    # Try to load the compiled DSPy program from file
+    # The program is saved by web_resource.py after compilation
     compiled_program = None
-    if hasattr(local_mcp_server, 'global_state'):
-        compiled_program = local_mcp_server.global_state.get("compiled_http_program")
-        logging.info(f"compiled_program: {compiled_program}")
+    dspy_program_path = os.path.join(os.getcwd(), "data", ".dspy_cache", "http_program.json")
+    
+    if os.path.exists(dspy_program_path):
+        try:
+            compiled_program = HttpProgram()
+            compiled_program.load(dspy_program_path)
+            logging.info(f"Loaded compiled DSPy program from {dspy_program_path}")
+        except Exception as e:
+            logging.error(f"Failed to load DSPy program: {e}")
+            compiled_program = None
     else:
-        logging.info("No global_state found on local_mcp_server")
+        logging.info(f"No compiled DSPy program found at {dspy_program_path}")
     
     if compiled_program:
         try:

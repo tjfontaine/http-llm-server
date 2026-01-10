@@ -44,9 +44,10 @@ training_data_module = __import__(
 
 
 @pytest.mark.skip(
-    reason="DSPy compilation doesn't work with stdio subprocess architecture. "
-    "The DSPy-compiled program can't be passed to the MCP subprocess, "
-    "so these tests will always use the fallback response."
+    reason="The runtime now uses direct HTTP generation instead of DSPy. "
+    "These tests are for DSPy-compiled output which requires real LLM calls "
+    "during compilation. File-based DSPy save/load is implemented for when "
+    "DSPy is re-enabled."
 )
 @pytest.mark.parametrize("example", [
     pytest.param(example, id=f"training_example_{i}")

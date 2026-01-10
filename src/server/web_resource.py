@@ -227,12 +227,14 @@ class WebServer:
                     HttpProgram(), trainset=training_data
                 )
                 self.app["compiled_http_program"] = compiled_http_program
-                for server in mcp_servers:
-                    if isinstance(server, MCPServerStdio):
-                        server.global_state[
-                            "compiled_http_program"
-                        ] = compiled_http_program
-                app_logger.info("DSPy program compiled successfully.")
+                
+                # Save the compiled program to a file so the MCP subprocess can load it
+                # DSPy programs can be saved and loaded via save()/load() methods
+                dspy_cache_dir = os.path.join(os.getcwd(), "data", ".dspy_cache")
+                os.makedirs(dspy_cache_dir, exist_ok=True)
+                dspy_program_path = os.path.join(dspy_cache_dir, "http_program.json")
+                compiled_http_program.save(dspy_program_path)
+                app_logger.info(f"DSPy program saved to {dspy_program_path}")
         except Exception as e:
             app_logger.warning(
                 f"DSPy compilation failed: {e}. Server will use fallback responses."
