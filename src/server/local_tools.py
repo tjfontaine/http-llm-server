@@ -20,6 +20,33 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""
+Local Tools MCP Server - Tier 2: Application AI Tools
+
+This module provides the MCP (Model Context Protocol) server that runs as a
+subprocess and exposes tools to the Application AI for handling HTTP requests.
+
+Architecture:
+    main.py (Orchestrator AI) → core_services.py (Tier 1 MCP)
+                                    ↓
+                               web_resource.py (WebServer)
+                                    ↓
+                               local_tools.py (Tier 2 MCP) ← This module
+                                    ↓
+                               dspy_module.py (HTTP response generation)
+
+Tools provided:
+    - create_session: Generate unique session IDs for user tracking
+    - set_global_state/get_global_state: Key-value store for app state
+    - download_file: Fetch external resources
+    - generate_http_response: Use compiled DSPy program for HTTP generation
+
+The DSPy integration uses environment variables passed from the parent process:
+    - OPENAI_API_KEY: API key for LLM calls
+    - OPENAI_BASE_URL: Custom endpoint (e.g., OpenRouter)
+    - OPENAI_MODEL_NAME: Model to use (default: gpt-4o)
+"""
+
 import asyncio
 import logging
 import os

@@ -70,15 +70,16 @@ graph LR;
 This two-tiered system creates a clean separation of concerns:
 
 - **Tier 1: The Orchestrator AI** uses infrastructure-level tools to manage the
-  lifecycle of the web server. Its tools include `setup_web_app`,
-  `create_web_resource`, and `start_web_server`. It operates on the level of
-  processes and resources.
+  lifecycle of the web server. Its tools include `create_web_resource`,
+  `start_web_resource`, `stop_web_resource`, `setup_web_application`, and
+  `list_web_resources`. It operates on the level of processes and resources.
 
 - **Tier 2: The Application AI** uses application-level tools to handle a
-  specific HTTP request. Its tools include `create_session`, `get_session_data`,
-  `set_global_state`, and `download_file`. It operates on the level of user
-  sessions, state, and data. It tracks HTTP requests/responses as conversation
-  history, allowing for per session customized responses.
+  specific HTTP request. Its tools include `create_session`, `get_global_state`,
+  `set_global_state`, `download_file`, and `generate_http_response`. It operates
+  on the level of user sessions, state, and data. It tracks HTTP
+  requests/responses as conversation history, allowing for per session
+  customized responses.
 
 ## The Journey to Here
 
@@ -121,18 +122,21 @@ bootloader for a generative, AI-powered web application.
 1.  **Install dependencies:**
 
     ```bash
-    uv pip sync pyproject.toml
+    uv sync
     ```
 
-2.  **Set your API key:**
+2.  **Set your API key (and optionally a custom endpoint):**
 
     ```bash
     export OPENAI_API_KEY="your_key_here"
+    # Optional: use a custom endpoint like OpenRouter
+    export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+    export OPENAI_MODEL_NAME="google/gemini-3-flash-preview"
     ```
 
 3.  **Run the server with an example app:**
     ```bash
-    uv run main.py --web_app_file examples/simple_blog/prompt.md
+    uv run python main.py --web_app_file examples/simple_blog/prompt.md
     ```
 
 ## Testing
@@ -140,16 +144,16 @@ bootloader for a generative, AI-powered web application.
 This project uses `pytest` for its test suite. To run the tests, you first need to install the test dependencies:
 
 ```bash
-uv pip install -e .[dev]
+uv sync
 ```
 
 Once the dependencies are installed, you can run the test suite with:
 
 ```bash
-uv run test
+uv run pytest tests/test_integration.py -v
 ```
 
-The tests are located in the `tests/` directory and follow a Test-Driven Development (TDD) approach. The integration tests use a mock OpenAI server to ensure deterministic behavior and validate the DSPy integration.
+The tests are located in the `tests/` directory and follow a Test-Driven Development (TDD) approach. The integration tests use a mock OpenAI server that returns training data responses to ensure deterministic behavior and validate the DSPy integration.
 
 ### Configuration
 

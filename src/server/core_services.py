@@ -1,3 +1,27 @@
+"""
+Core Services MCP Server - Tier 1: Orchestrator AI Tools
+
+This module provides the MCP (Model Context Protocol) server that runs as a
+subprocess and exposes infrastructure-level tools to the Orchestrator AI.
+
+Architecture:
+    main.py (Orchestrator AI) → core_services.py (Tier 1 MCP) ← This module
+                                    ↓
+                               web_resource.py (WebServer)
+                                    ↓
+                               local_tools.py (Tier 2 MCP)
+
+Tools provided:
+    - create_web_resource: Spawn a new WebServer instance
+    - start_web_resource: Start a created web server
+    - stop_web_resource: Stop a running web server
+    - setup_web_application: Configure application from prompt file
+    - list_web_resources: List all managed web server resources
+
+The Orchestrator AI uses these tools to manage the lifecycle of web servers,
+while the Application AI (via local_tools) handles individual HTTP requests.
+"""
+
 import asyncio
 import logging
 import os
