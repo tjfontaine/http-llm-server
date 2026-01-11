@@ -147,12 +147,12 @@ training_data = [
     # ========== Session-Aware Responses ==========
     dspy.Example(
         context='{"session_id": "abc-123", "visit_count": 5}',
-        http_request="GET / HTTP/1.1\r\nHost: localhost:8080\r\nCookie: session_id=abc-123\r\nAccept: text/html\r\n\r\n",
+        http_request="GET /dashboard HTTP/1.1\r\nHost: localhost:8080\r\nCookie: session_id=abc-123\r\nAccept: text/html\r\n\r\n",
         http_response=(
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html; charset=utf-8\r\n"
             "\r\n"
-            "<!DOCTYPE html>\n<html><head><title>Welcome Back</title></head>"
+            "<!DOCTYPE html>\n<html><head><title>Dashboard</title></head>"
             "<body><h1>Welcome back!</h1><p>You have visited 5 times.</p></body></html>"
         )
     ).with_inputs("context", "http_request"),

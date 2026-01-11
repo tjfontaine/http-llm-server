@@ -21,6 +21,26 @@ class MockOpenAIServer:
         self.app = web.Application()
         self._setup_routes()
         self.conversation_state = {}
+        # Load training data for path-based response lookup
+        self._load_training_data()
+    
+    def _load_training_data(self):
+        """Load training data and create path-to-response mapping"""
+        import re
+        from src.training_data import training_data
+        
+        self.path_responses = {}
+        for example in training_data:
+            # Extract method and path from http_request
+            request_line = example.http_request.split('\r\n')[0]
+            match = re.match(r'(\w+)\s+(\S+)\s+HTTP/', request_line)
+            if match:
+                method, path = match.groups()
+                key = f"{method}:{path}"
+                # Only use first occurrence of each path (first-wins policy)
+                if key not in self.path_responses:
+                    self.path_responses[key] = example.http_response
+                    print(f"Loaded training response for {key}")
     
     def _setup_routes(self):
         # Chat Completions API (legacy, for DSPy)
@@ -98,7 +118,59 @@ class MockOpenAIServer:
                 return web.json_response(response)
         
         elif tools and conversation_id not in self.conversation_state:
-            # First request with tools available, make tool call
+            # First request with tools available
+            # Check if we have a matching training response - if so, return it directly
+            import re
+            http_method = "GET"
+            http_path = "/"
+            
+            # Extract method and path from user message
+            for msg in messages:
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        match = re.search(r'(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP/', content)
+                        if match:
+                            http_method, http_path = match.groups()
+                            print(f"Chat API: Extracted HTTP request: {http_method} {http_path}")
+                            break
+            
+            lookup_key = f"{http_method}:{http_path}"
+            print(f"Chat API: Looking up response for: {lookup_key}")
+            
+            if lookup_key in self.path_responses:
+                # Return training response directly without calling tool
+                print(f"Chat API: Returning training response for {lookup_key}")
+                http_response = self.path_responses[lookup_key]
+                
+                if stream:
+                    # Return streaming response for training data
+                    return await self._create_streaming_training_response(
+                        request, http_response
+                    )
+                else:
+                    response = {
+                        "id": "chatcmpl-test-training",
+                        "object": "chat.completion",
+                        "created": 1677652288,
+                        "model": "gpt-3.5-turbo",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": http_response
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 50,
+                            "total_tokens": 60
+                        }
+                    }
+                    return web.json_response(response)
+            
+            # No matching training response, make tool call
             self.conversation_state[conversation_id] = True
             print("Making tool call to generate_http_response")
             
@@ -170,6 +242,7 @@ class MockOpenAIServer:
     
     async def _handle_responses(self, request):
         """Handle Responses API requests (openai-agents 0.6+)"""
+        import re
         print(f"Mock Responses API received request: {request.method} {request.path}")
         data = await request.json()
         print(f"Responses API request data: {data}")
@@ -186,6 +259,24 @@ class MockOpenAIServer:
             isinstance(item, dict) and item.get("type") == "function_call_output"
             for item in input_items
         )
+        
+        # Extract HTTP method and path from the user message to look up response
+        http_method = "GET"
+        http_path = "/"
+        print(f"DEBUG: input_items = {json.dumps(input_items, default=str)[:500]}")
+        for item in input_items:
+            if isinstance(item, dict) and item.get("role") == "user":
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    # Look for HTTP request line pattern in user message
+                    match = re.search(r'(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP/', content)
+                    if match:
+                        http_method, http_path = match.groups()
+                        print(f"Extracted HTTP request: {http_method} {http_path}")
+                        break
+        
+        lookup_key = f"{http_method}:{http_path}"
+        print(f"Looking up response for: {lookup_key}")
         
         import time
         base_response = {
@@ -238,6 +329,30 @@ class MockOpenAIServer:
             }
             return web.json_response(response)
         
+        # If we have a matching training response, return it directly instead of calling tool
+        elif lookup_key in self.path_responses:
+            print(f"Responses API: Returning training response directly for {lookup_key}")
+            http_response_text = self.path_responses[lookup_key]
+            response = {
+                **base_response,
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_training",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": http_response_text,
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ],
+            }
+            return web.json_response(response)
+        
         elif tools and conv_key not in self.conversation_state:
             # First request with tools - make a function call to generate_http_response
             self.conversation_state[conv_key] = True
@@ -270,8 +385,19 @@ class MockOpenAIServer:
             }
             return web.json_response(response)
         
-        # Fallback - return a simple message response
-        print("Responses API: Returning direct message response")
+        # Fallback - return a simple message response using path_responses lookup
+        print(f"Responses API: Returning direct message response for {lookup_key}")
+        
+        # Look up the response from training data, or use default
+        http_response_text = self.path_responses.get(
+            lookup_key,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Hello, world!"
+        )
+        print(f"Using response: {http_response_text[:100]}...")
+        
         response = {
             **base_response,
             "output": [
@@ -283,12 +409,7 @@ class MockOpenAIServer:
                     "content": [
                         {
                             "type": "output_text",
-                            "text": (
-                                "HTTP/1.1 200 OK\r\n"
-                                "Content-Type: text/plain; charset=utf-8\r\n"
-                                "\r\n"
-                                "Hello, world!"
-                            ),
+                            "text": http_response_text,
                             "annotations": []
                         }
                     ]
@@ -296,6 +417,45 @@ class MockOpenAIServer:
             ],
         }
         return web.json_response(response)
+    
+    async def _create_streaming_training_response(self, request, http_response):
+        """Create streaming response for training data - returns HTTP response as content"""
+        response = web.StreamResponse()
+        response.headers['Content-Type'] = 'text/event-stream'
+        await response.prepare(request)
+        
+        # Send content chunk with the full HTTP response
+        content_chunk = {
+            "id": "chatcmpl-test-training",
+            "object": "chat.completion.chunk",
+            "created": 1677652288,
+            "model": "gpt-3.5-turbo",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": http_response
+                },
+                "finish_reason": None
+            }]
+        }
+        await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
+        
+        # Send finish chunk
+        finish_chunk = {
+            "id": "chatcmpl-test-training",
+            "object": "chat.completion.chunk",
+            "created": 1677652288,
+            "model": "gpt-3.5-turbo",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }
+        await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
     
     async def _create_streaming_tool_call(self, request):
         """Create streaming response for tool call"""

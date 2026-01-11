@@ -13,8 +13,9 @@ async def test_initial_request_is_deterministic_raw_http_exact(client):
     # so we can't match exact bytes. Instead verify the key LLM-generated content.
     assert response.status == 200
     assert response.reason == "OK"
-    assert response.headers.get("Content-Type") == "text/plain; charset=utf-8"
-    assert body.decode('utf-8') == "Hello, world!"
+    # Training data returns HTML for GET /
+    assert response.headers.get("Content-Type") == "text/html; charset=utf-8"
+    assert "Welcome to the HTTP LLM Server" in body.decode('utf-8')
 
 
 @pytest.mark.asyncio
@@ -24,18 +25,20 @@ async def test_initial_request_raw_http_deterministic(client):
     body = await response.read()
     
     assert response.status == 200
-    assert response.headers["Content-Type"] == "text/plain; charset=utf-8"
-    assert body == b"Hello, world!"
+    # Training data returns HTML for GET /
+    assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert b"Welcome to the HTTP LLM Server" in body
 
 
 @pytest.mark.asyncio
 async def test_dspy_integration_with_fallback(client):
-    """Test that DSPy integration works with fallback response in test mode"""
+    """Test that DSPy integration works with training data response in test mode"""
     response = await client.get("/")
     body = await response.read()
     assert response.status == 200
-    assert response.headers["Content-Type"] == "text/plain; charset=utf-8"
-    assert body == b"Hello, world!"
+    # Training data returns HTML for GET /
+    assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert b"Welcome to the HTTP LLM Server" in body
 
 
 training_data_module = __import__(
@@ -43,12 +46,6 @@ training_data_module = __import__(
 )
 
 
-@pytest.mark.skip(
-    reason="The runtime now uses direct HTTP generation instead of DSPy. "
-    "These tests are for DSPy-compiled output which requires real LLM calls "
-    "during compilation. File-based DSPy save/load is implemented for when "
-    "DSPy is re-enabled."
-)
 @pytest.mark.parametrize("example", [
     pytest.param(example, id=f"training_example_{i}")
     for i, example in enumerate(training_data_module.training_data)
@@ -68,6 +65,8 @@ async def test_compiled_program_matches_training_examples(
         response = await client_with_dspy.get(path)
     elif method == "POST":
         response = await client_with_dspy.post(path)
+    elif method == "DELETE":
+        response = await client_with_dspy.delete(path)
     # Add other methods as needed
     
     # Read the full response
