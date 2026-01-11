@@ -177,11 +177,27 @@ async def generate_http_response(
         http_request: The raw HTTP request string
     """
     import os
+    import dspy
     from src.dspy_module import HttpProgram
     
     logging.info("generate_http_response tool called!")
     logging.info(f"context_str: {context_str}")
     logging.info(f"http_request: {http_request}")
+    
+    # Configure DSPy with LM from environment variables
+    # This is required because the subprocess doesn't inherit the in-memory configuration
+    model_name = os.environ.get("OPENAI_MODEL_NAME", "gpt-4o")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    
+    if api_key:
+        lm_config = {"api_key": api_key}
+        if base_url:
+            lm_config["api_base"] = base_url
+        dspy.configure(lm=dspy.LM(f"openai/{model_name}", **lm_config))
+        logging.info(f"Configured DSPy with model: openai/{model_name}")
+    else:
+        logging.warning("No OPENAI_API_KEY found, DSPy will use default configuration")
     
     # Try to load the compiled DSPy program from file
     # The program is saved by web_resource.py after compilation
